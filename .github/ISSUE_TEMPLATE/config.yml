@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: AI-site 前端问题
-    url: https://github.com/caixiongjiang/AI-site/issues/new/choose
+    url: https://github.com/foliaai/folio-web/issues/new/choose
     about: 页面展示、路由、前端请求拼装问题请到前端仓库提
   - name: skill_service 技能服务问题
-    url: https://github.com/caixiongjiang/skill_service/issues/new/choose
+    url: https://github.com/foliaai/folio-skill-server/issues/new/choose
     about: 技能 CRUD、descriptors、技能服务本身的问题请到 skill_service 提
