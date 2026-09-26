@@ -5,29 +5,28 @@
 @File    : auth.py
 @Author  : caixiongjiang
 @Date    : 2026/01/21 10:00
-@Function: 
-    认证依赖模块（已切换到 folio-auth-core 统一验签）
+@Function:
+    认证依赖模块（纯委托 folio-auth-core 统一验签）
 
-    本文件从"自己实现验签"降级为薄转发层：四个同名依赖全部委托给
-    folio-auth-core（RS256 + JWKS），业务路由零改动。
+    登录与签发完全由 folio-auth-server 承担（Logto / 企业OA 两种上游，
+    由其部署环境决定），AKS 只消费它签发的 RS256 JWT：
 
-    验签规则（auth-core 统一实现）：
-      - Authorization: Bearer <folio-auth RS256 JWT>（folio-auth-server 签发）
-      - 过渡兼容①：旧 AKS HS256 token（issuer aks-auth，
-        密钥取 AUTH_JWT_SECRET / JWT_SECRET_KEY），存量 token 到期自然淘汰
-      - 过渡兼容②：无 Bearer 时透传 X-User-Id / 明文 query user_id
-        （AUTH_HEADER_PASSTHROUGH 控制，默认 true；
-        前端全面切换 /auth-api 登录后应设为 false 关闭裸透传）
+      - Authorization: Bearer <folio-auth RS256 JWT>（HTTP 通道）
+      - ?token=<JWT>（react-pdf / <img> 等无法带 header 的资源加载）
+      - WebSocket 握手 query token / 子协议（见 auth_core.deps）
+
+    本文件不再保留任何兼容层：旧 AKS 自签 HS256 token 与
+    X-User-Id 明文透传均已下线，业务路由通过下方四个同名依赖
+    零改动使用 auth-core 实现。
 
     环境变量：
-      AUTH_SERVER_URL         folio-auth-server 根地址（默认 http://localhost:8003）
-      AUTH_HEADER_PASSTHROUGH 过渡透传开关（默认 true，切换完成后改 false）
-      AUTH_ADMIN_USER_IDS     引导管理员白名单（AKS 自身暂无 admin 接口，预留）
+      AUTH_SERVER_URL   folio-auth-server 根地址（默认 http://localhost:8003）
 
 @Modify History:
     2026/02/18 - 实现简化版用户认证（Header 提取 user_id）
     2026/09/16 - 新增 AUTH_MODE=oa 的本域 JWT 校验（HTTP / query / WebSocket 三通道）
     2026/09/26 - 验签切换 folio-auth-core（RS256 为主，HS256/X-User-Id 过渡兼容）
+    2026/09/27 - 移除旧认证实现与全部兼容层（旧登录路由 / src/auth 已删除）
 @Copyright：Copyright(c) 2024-2026. All Rights Reserved
 =================================================="""
 
@@ -49,36 +48,20 @@ __all__ = [
 
 
 def _configure_auth_core() -> None:
-    """按 AKS 环境变量装配 auth-core 校验器（import 时执行一次）"""
-    env = get_env_manager()
+    """按 AKS 环境变量装配 auth-core 校验器（import 时执行一次）
 
-    server_base = (env.get("AUTH_SERVER_URL", "") or "").strip().rstrip("/")
+    只覆盖 JWKS 端点；issuer 用 auth-core 默认值（folio-auth），
+    header_passthrough / legacy_secret 均保持默认关闭——本域只认
+    folio-auth-server 签发的 RS256 JWT。
+    """
+    env = get_env_manager()
+    server_base = (env.get("AUTH_SERVER_URL") or "").strip().rstrip("/")
     if not server_base:
         server_base = "http://localhost:8003"
-
-    # 旧 HS256 密钥：优先 AUTH_JWT_SECRET，回退 JWT_SECRET_KEY；都没有则不校验旧 token
-    legacy_secret = (env.get("AUTH_JWT_SECRET", "") or "").strip()
-    if not legacy_secret:
-        legacy_secret = (env.get("JWT_SECRET_KEY", "") or "").strip()
-    legacy_secret = legacy_secret or None
-
-    passthrough_raw = (env.get("AUTH_HEADER_PASSTHROUGH", "") or "").strip().lower()
-    header_passthrough = passthrough_raw not in {"false", "0", "no", "off"}
-
-    admin_ids = tuple(
-        item.strip()
-        for item in (env.get("AUTH_ADMIN_USER_IDS", "") or "").split(",")
-        if item.strip()
-    )
 
     configure_verifier(
         AuthCoreSettings(
             jwks_url=f"{server_base}/api/auth/jwks",
-            issuer="folio-auth",
-            legacy_secret=legacy_secret,
-            legacy_issuer="aks-auth",
-            header_passthrough=header_passthrough,
-            admin_user_ids=admin_ids,
         )
     )
 
