@@ -13,8 +13,9 @@
 @Copyright：Copyright(c) 2024-2026. All Rights Reserved
 =================================================="""
 
+from api.routers.auth import auth_router
 from api.routers.chat import chat_router
 from api.routers.knowledge import knowledge_router
 from api.routers.user import user_router
 
-__all__ = ["knowledge_router", "chat_router", "user_router"]
+__all__ = ["knowledge_router", "chat_router", "user_router", "auth_router"]
