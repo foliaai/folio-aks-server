@@ -12,7 +12,7 @@ jobs:
       - name: Deploy AKS JP
         run: |
           set -e
-          cd ${{ secrets.JP_DEPLOY_PATH }}/agentic_knowledge_system
+          cd ${{ secrets.JP_DEPLOY_PATH }}/folio-aks-server
           git pull origin jp_model_lake_adapt
           docker compose -f docker-compose.jp.yml up -d --build
           docker image prune -f
