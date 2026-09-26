@@ -6,119 +6,81 @@
 @Author  : caixiongjiang
 @Date    : 2026/01/21 10:00
 @Function: 
-    认证依赖模块
-    提供 API 认证相关的依赖注入功能
+    认证依赖模块（已切换到 folio-auth-core 统一验签）
+
+    本文件从"自己实现验签"降级为薄转发层：四个同名依赖全部委托给
+    folio-auth-core（RS256 + JWKS），业务路由零改动。
+
+    验签规则（auth-core 统一实现）：
+      - Authorization: Bearer <folio-auth RS256 JWT>（folio-auth-server 签发）
+      - 过渡兼容①：旧 AKS HS256 token（issuer aks-auth，
+        密钥取 AUTH_JWT_SECRET / JWT_SECRET_KEY），存量 token 到期自然淘汰
+      - 过渡兼容②：无 Bearer 时透传 X-User-Id / 明文 query user_id
+        （AUTH_HEADER_PASSTHROUGH 控制，默认 true；
+        前端全面切换 /auth-api 登录后应设为 false 关闭裸透传）
+
+    环境变量：
+      AUTH_SERVER_URL         folio-auth-server 根地址（默认 http://localhost:8003）
+      AUTH_HEADER_PASSTHROUGH 过渡透传开关（默认 true，切换完成后改 false）
+      AUTH_ADMIN_USER_IDS     引导管理员白名单（AKS 自身暂无 admin 接口，预留）
+
 @Modify History:
     2026/02/18 - 实现简化版用户认证（Header 提取 user_id）
+    2026/09/16 - 新增 AUTH_MODE=oa 的本域 JWT 校验（HTTP / query / WebSocket 三通道）
+    2026/09/26 - 验签切换 folio-auth-core（RS256 为主，HS256/X-User-Id 过渡兼容）
 @Copyright：Copyright(c) 2024-2026. All Rights Reserved
 =================================================="""
 
-from typing import Optional
+from auth_core import AuthCoreSettings, configure_verifier
+from auth_core.deps import (
+    close_unauthorized,
+    get_current_user_id,
+    get_current_user_id_from_token,
+    get_current_user_id_ws,
+)
+from src.utils.env_manager import get_env_manager
 
-from fastapi import Header, HTTPException, Query, WebSocket, status
-
-
-async def get_current_user_id(
-    x_user_id: str = Header(..., alias="X-User-Id", description="用户ID")
-) -> str:
-    """
-    从请求头中提取当前用户ID
-
-    生产环境应替换为 JWT Token 验证逻辑。
-
-    Args:
-        x_user_id: 请求头中的用户ID
-
-    Returns:
-        用户ID字符串
-
-    Raises:
-        HTTPException: 如果用户ID为空
-    """
-    if not x_user_id or not x_user_id.strip():
-        raise HTTPException(status_code=401, detail="缺少有效的用户标识")
-    return x_user_id.strip()
+__all__ = [
+    "get_current_user_id",
+    "get_current_user_id_from_token",
+    "get_current_user_id_ws",
+    "close_unauthorized",
+]
 
 
-async def get_current_user_id_from_token(
-    token: str = Query(..., description="用户ID（query token 通道，与 X-User-Id 等价）")
-) -> str:
-    """
-    从 query 参数 ``token`` 提取当前用户 ID。
+def _configure_auth_core() -> None:
+    """按 AKS 环境变量装配 auth-core 校验器（import 时执行一次）"""
+    env = get_env_manager()
 
-    适用场景：浏览器原生无法自定义请求头的资源加载（如 react-pdf 的
-    ``<Document file={url}>``、``<img src>`` 等），它们只能走普通 GET，
-    无法携带 ``X-User-Id`` header。此时改用 ``?token=<user_id>`` 鉴权，
-    与 WebSocket 的 query token 通道保持一致。
+    server_base = (env.get("AUTH_SERVER_URL", "") or "").strip().rstrip("/")
+    if not server_base:
+        server_base = "http://localhost:8003"
 
-    生产环境应替换为 JWT Token 验证逻辑。
+    # 旧 HS256 密钥：优先 AUTH_JWT_SECRET，回退 JWT_SECRET_KEY；都没有则不校验旧 token
+    legacy_secret = (env.get("AUTH_JWT_SECRET", "") or "").strip()
+    if not legacy_secret:
+        legacy_secret = (env.get("JWT_SECRET_KEY", "") or "").strip()
+    legacy_secret = legacy_secret or None
 
-    Args:
-        token: query 参数中的用户ID
+    passthrough_raw = (env.get("AUTH_HEADER_PASSTHROUGH", "") or "").strip().lower()
+    header_passthrough = passthrough_raw not in {"false", "0", "no", "off"}
 
-    Returns:
-        用户ID字符串
-
-    Raises:
-        HTTPException: 如果 token 为空
-    """
-    user_id = (token or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=401, detail="缺少有效的用户标识")
-    return user_id
-
-
-
-async def get_current_user_id_ws(websocket: WebSocket) -> Optional[str]:
-    """
-    从 WebSocket 握手中提取当前用户 ID
-
-    背景
-    ----
-    浏览器原生 WebSocket API **不能** 自定义 HTTP header，无法复用 HTTP 版的
-    ``X-User-Id``。生产实践有两种通用做法：
-
-    1. **query token**（首选）: 客户端 ``ws://host/api/chat/ws?token=<id>``；
-       因为 query 在握手期就到达服务端，可以在 ``accept()`` 之前完成校验。
-    2. **Sec-WebSocket-Protocol 子协议**: 把 token 拼到子协议字符串里
-       （如 ``aks-chat-v1.<token>``），也能避免暴露到 URL 上（部分 CDN 会记
-       录 URL）；本函数也兼容这种方式。
-
-    返回 ``None`` 表示鉴权失败，调用方应当 ``close(code=1008)``。本函数
-    **不直接抛 HTTPException**，因为在 ``accept()`` 之前 FastAPI 还没有
-    建立 ASGI 响应循环，抛异常的效果不可预期。
-
-    Args:
-        websocket: FastAPI WebSocket 实例（注入由路由侧完成）
-
-    Returns:
-        用户 ID 字符串；鉴权失败返回 ``None``
-    """
-    # 1) 首选：query token
-    token = websocket.query_params.get("token") or websocket.query_params.get(
-        "user_id"
+    admin_ids = tuple(
+        item.strip()
+        for item in (env.get("AUTH_ADMIN_USER_IDS", "") or "").split(",")
+        if item.strip()
     )
-    if token and token.strip():
-        return token.strip()
 
-    # 2) 备选：Sec-WebSocket-Protocol 形如 "aks-chat-v1.<token>"
-    raw = websocket.headers.get("sec-websocket-protocol") or ""
-    for sub in [s.strip() for s in raw.split(",") if s.strip()]:
-        if "." in sub:
-            _, _, candidate = sub.partition(".")
-            if candidate:
-                return candidate
+    configure_verifier(
+        AuthCoreSettings(
+            jwks_url=f"{server_base}/api/auth/jwks",
+            issuer="folio-auth",
+            legacy_secret=legacy_secret,
+            legacy_issuer="aks-auth",
+            header_passthrough=header_passthrough,
+            admin_user_ids=admin_ids,
+        )
+    )
 
-    return None
 
-
-async def close_unauthorized(websocket: WebSocket, reason: str = "unauthorized") -> None:
-    """统一关闭"未鉴权"的 WS 连接
-
-    code=1008 = Policy Violation（WS 协议规范定义为"鉴权失败"的标准码）
-    """
-    try:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=reason)
-    except Exception:  # noqa: BLE001
-        # 已经断开等场景；忽略
-        pass
+_configure_auth_core()

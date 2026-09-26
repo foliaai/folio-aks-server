@@ -18,7 +18,7 @@
 
 *另需说明：全文采用**方法论视角**——讨论「一套 Agentic 知识库该怎么建、每个设计背后的取舍是什么」，而不聚焦于某个具体系统的落地代码。选型示例（如 MySQL / Milvus / MinerU / BGE-M3 等）只作为读者理解的参照物，并非必需的技术栈。*
 
-参考知识系统后端代码：[https://github.com/caixiongjiang/agentic_knowledge_system](https://github.com/caixiongjiang/agentic_knowledge_system)
+参考知识系统后端代码：[https://github.com/foliaai/folio-aks-server](https://github.com/foliaai/folio-aks-server)
 
 ## 体系化的知识结构
 
