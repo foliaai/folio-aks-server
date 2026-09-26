@@ -21,6 +21,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "deepagents" },
     { name = "fastapi" },
+    { name = "folio-auth-core" },
     { name = "httpx" },
     { name = "langchain-text-splitters" },
     { name = "litellm" },
@@ -53,6 +54,7 @@ requires-dist = [
     { name = "cryptography" },
     { name = "deepagents", specifier = ">=0.5.1" },
     { name = "fastapi", specifier = ">=0.129.0" },
+    { name = "folio-auth-core", path = "third_party/folio_auth_core-0.1.0-py3-none-any.whl" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain-text-splitters", specifier = ">=1.1.0" },
     { name = "litellm", specifier = ">=1.78.0" },
@@ -719,6 +721,28 @@ version = "25.12.19"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl", hash = "sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4", size = 26661, upload-time = "2025-12-19T23:16:13.622Z" },
+]
+
+[[package]]
+name = "folio-auth-core"
+version = "0.1.0"
+source = { path = "third_party/folio_auth_core-0.1.0-py3-none-any.whl" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "loguru" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
+wheels = [
+    { filename = "folio_auth_core-0.1.0-py3-none-any.whl", hash = "sha256:091d250af535643e2543168c8812be6ababd98f9b55aa45f63856958b1da820d" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.129.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10.1" },
 ]
 
 [[package]]
@@ -2285,6 +2309,11 @@ source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/af/c3/8a3b59c25070cc61dc517fbdfa5dc0904670c96f605cc69759dc09166b99/pyjwt-2.14.0.tar.gz", hash = "sha256:77283c83fb56ecf566a886c757a714bc83668e38156de2cce8263302f42e0b86", size = 113177, upload-time = "2026-09-11T13:11:54.638Z" }
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/9c/97/672cb32ce0dfea44b740cb7b4f97038463b9cf7c0ead1aacf595572851d6/pyjwt-2.14.0-py3-none-any.whl", hash = "sha256:ad0cef71c756a56e74863c2919cf0985f72decbcfcb550ee2f422e7c62b5eedc", size = 32896, upload-time = "2026-09-11T13:11:53.409Z" },
+]
+
+[package.optional-dependencies]
+crypto = [
+    { name = "cryptography" },
 ]
 
 [[package]]

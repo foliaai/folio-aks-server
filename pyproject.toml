@@ -12,6 +12,7 @@ dependencies = [
     "cryptography",
     "deepagents>=0.5.1",
     "fastapi>=0.129.0",
+    "folio-auth-core>=0.1.0",
     "httpx>=0.28.1",
     "langchain-text-splitters>=1.1.0",
     "litellm>=1.78.0",
@@ -41,3 +42,6 @@ default = true
 
 [tool.uv.sources]
 skill-core = { path = "third_party/skill_core-0.2.3-py3-none-any.whl" }
+# 本地开发用 wheel 快照；auth-core 仓库打 tag 后可换 git 依赖：
+#   folio-auth-core = { git = "https://github.com/foliaai/folio-auth-core.git", tag = "v0.1.0" }
+folio-auth-core = { path = "third_party/folio_auth_core-0.1.0-py3-none-any.whl" }
