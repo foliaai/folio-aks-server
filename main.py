@@ -26,7 +26,7 @@ setup_logging_from_env()
 
 import os
 
-from api.routers import chat_router, knowledge_router, user_router
+from api.routers import chat_router, knowledge_router
 from src.db.kafka.connection.factory import close_kafka_manager
 from src.db.mongodb.mongodb_manager import get_mongodb_manager
 from src.db.mysql.connection.factory import get_mysql_manager
@@ -109,7 +109,6 @@ app.add_middleware(
 
 app.include_router(knowledge_router)
 app.include_router(chat_router)
-app.include_router(user_router)
 
 
 if __name__ == "__main__":
