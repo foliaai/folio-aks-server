@@ -21,7 +21,6 @@ dependencies = [
     "minio>=7.2.20",
     "motor>=3.7.1",
     "pydantic>=2.12.5",
-    "pyjwt>=2.10.1",
     "pymilvus[milvus-lite,model]>=2.6.6",
     "pymysql>=1.1.2",
     "pypdf>=6.6.0",
