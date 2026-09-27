@@ -531,10 +531,6 @@ class EnvManager:
     def get_app_secret_key(self) -> str:
         """获取应用密钥"""
         return self.get_required("APP_SECRET_KEY")
-    
-    def get_jwt_secret_key(self) -> Optional[str]:
-        """获取JWT密钥"""
-        return self.get("JWT_SECRET_KEY")
 
 
 # 创建全局单例
