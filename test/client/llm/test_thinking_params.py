@@ -27,7 +27,6 @@ from src.client.llm.thinking_adapter import (
 
 
 def _build(model="litellm_proxy/qwen3.7-plus", reasoning_effort=_REASONING_UNSET, cfg_effort=None):
-    from unittest.mock import MagicMock, patch
     from src.client.llm.client import LLMClient, LLMClientConfig
 
     client = LLMClient(
@@ -36,14 +35,10 @@ def _build(model="litellm_proxy/qwen3.7-plus", reasoning_effort=_REASONING_UNSET
             default_reasoning_effort=cfg_effort,
         ),
     )
-    mock_auth = MagicMock()
-    mock_auth.get_token.return_value = "ml-mock-token"
-    with patch("src.client.llm.model_lake_auth.get_model_lake_auth", return_value=mock_auth):
-        params = client._build_params(  # noqa: SLF001
-            [{"role": "user", "content": "hi"}],
-            reasoning_effort=reasoning_effort,
-        )
-    return params
+    return client._build_params(  # noqa: SLF001
+        [{"role": "user", "content": "hi"}],
+        reasoning_effort=reasoning_effort,
+    )
 
 
 def test_call_none_and_cfg_none_sends_nothing() -> None:

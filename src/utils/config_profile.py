@@ -90,18 +90,32 @@ def load_profile_preset_models(profile: Optional[str] = None) -> Dict[str, str]:
 
 
 def load_profile_visible_models(profile: Optional[str] = None) -> List[str]:
-    """读取 ``models.toml`` 的 ``visible``：前端对话主模型白名单。
+    """读取 ``models.toml`` 的 ``visible``：前端对话主模型白名单（litellm 档案）。
 
     空列表表示下拉不展示任何模型。匹配时会去掉 ``openai/`` / ``litellm_proxy/``
     调用前缀，但保留 Model Lake 的 ``channel/model``。
     """
+    return _load_model_list_section("visible", profile)
+
+
+def load_profile_hidden_models(profile: Optional[str] = None) -> List[str]:
+    """读取 ``models.toml`` 的 ``[hidden]``：前端对话主模型黑名单（model_lake 档案）。
+
+    model_lake（ModelNexus）网关的 ``/v1/models`` 即真相源、默认全部可见，
+    档案只登记"不想暴露给前端"的模型做减法；空列表（或缺 section）= 全可见。
+    """
+    return _load_model_list_section("hidden", profile)
+
+
+def _load_model_list_section(section: str, profile: Optional[str] = None) -> List[str]:
+    """读取 ``models.toml`` 中形如 ``[<section>].models = [...]`` 的模型名列表。"""
     import toml
 
     path = resolve_profile_file("models.toml", profile)
     if not path.exists():
         return []
     data = toml.load(path) or {}
-    raw = data.get("visible")
+    raw = data.get(section)
     if isinstance(raw, dict):
         raw = raw.get("models") or raw.get("ids") or []
     if not isinstance(raw, list):
@@ -126,6 +140,7 @@ __all__ = [
     "PROFILE_ALIASES",
     "PROFILES_ROOT",
     "get_profile_dir",
+    "load_profile_hidden_models",
     "load_profile_preset_models",
     "load_profile_presets",
     "load_profile_visible_models",

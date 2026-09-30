@@ -1,68 +1,72 @@
-# Model Lake 档案
-# 写 /v1/models 返回的真实路由（channel/model）；运行时只补 openai/ 调用前缀
-# [presets.<role>] 是抽取 pipeline / 检索组件 / 工具用的角色：模型 + 采样参数
-# [visible].models 是前端对话主模型白名单，必须写完整 channel/model
+# ModelNexus（model_lake）档案
+# 模型 id 写 /v1/models 返回的真实路由（channel/model）；运行时只补 openai/ 调用前缀
+#
+# 能力声明（思考档位 / 多模态 / 上下文长度 / 弃用过滤）全部由 /v1/models
+# 富元数据在运行时自动合成（registry._fetch_model_lake），本档案不再维护
+# thinking_models.json / multimodal_models.json / long_context_models.json。
+# 仅保留两类人工内容：
+#   [presets.<role>]  内部 pipeline 角色的模型绑定 + 采样参数（刷新时校验存在性）
+#   [hidden].models   不想暴露给前端对话的模型黑名单（空 = 网关模型全部可见）
 
 # 性价比优先；用于起标题 / 摘要压缩 / 检索结果 LLM 验证等短轻调用
 [presets.fast]
-model = "alibaba-dashscope/ali-qwen3-7-flash"
+model = "qwen/qwen3.7-flash"
 temperature = 0.3
 max_tokens = 65536
 timeout = 60
 thinking_level = "off"
 
+# 质量优先（deepseek-v4-pro 已弃用，多模态旗舰顶位；3.8 系档位 low/medium/xhigh）
 [presets.quality]
-model = "deepseek-official/deepseek-v4-pro"
+model = "qwen/qwen3.8-max"
 temperature = 0.5
-max_tokens = 65536
-timeout = 120
-thinking_level = "high"
-
-# 推理优先；用于 RoutePlanner 等需要复杂推理的内部调用
-# zhipu-glm-5-1 只支持思考开关，thinking_level 只写 off / medium
-[presets.reasoning]
-model = "zhipu-bigmodel/zhipu-glm-5-1"
-temperature = 0.5
-max_tokens = 65536
+max_tokens = 131072
 timeout = 120
 thinking_level = "medium"
 
-[presets.long_context]
-model = "deepseek-official/deepseek-v4-flash"
+# 推理优先；用于 RoutePlanner 等需要复杂推理的内部调用（GLM-5.3 档位 low/high/max）
+[presets.reasoning]
+model = "z-ai/glm-5.3"
 temperature = 0.5
-max_tokens = 65536
+max_tokens = 128000
+timeout = 120
+thinking_level = "high"
+
+# 长上下文优先（deepseek v4.1-flash：1M 上下文 / 384K 输出）
+[presets.long_context]
+model = "deepseek/deepseek-v4.1-flash"
+temperature = 0.5
+max_tokens = 384000
 timeout = 90
 thinking_level = "low"
 
+# 推理旗舰；深度思考场景
 [presets.pro]
-model = "zhipu-bigmodel/zhipu-glm-5-2"
+model = "z-ai/glm-5.3"
 temperature = 0.5
-max_tokens = 65536
+max_tokens = 128000
 timeout = 150
 thinking_level = "max"
 
 # 读图路径专用；业务只在显式启用多模态时引用
-# ali-qwen3-7-flash 只支持思考开关，thinking_level 只写 off / medium
+# qwen3.7-flash 支持图片输入（/v1/models input_modalities 声明）；仅思考开关 off/medium
 [presets.multimodal]
-model = "alibaba-dashscope/ali-qwen3-7-flash"
+model = "qwen/qwen3.7-flash"
 temperature = 0.7
 max_tokens = 65536
 timeout = 90
 thinking_level = "medium"
 
 [presets.test]
-model = "alibaba-dashscope/ali-qwen3-7-flash"
+model = "qwen/qwen3.7-flash"
 temperature = 0.3
 max_tokens = 65536
 timeout = 60
 thinking_level = "medium"
 
-[visible]
+# 不想暴露给前端对话的模型（空列表 = 全部可见）
+[hidden]
 models = [
-  "alibaba-dashscope/ali-qwen3-7-flash",
-  "deepseek-official/deepseek-v4-flash",
-  "alibaba-dashscope/ali-qwen3-7-plus",
-  "alibaba-dashscope/ali-deepseek-v4-flash",
-  "xiaomi-mimo/xiaomi-mimo-v2-5",
-  "xiaomi-mimo/xiaomi-mimo-v2-5-pro"
+  # 本地自部署模型，元数据未录入（architecture 为 null，思考/多模态能力未知）
+  "local/qwen3.6",
 ]

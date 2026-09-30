@@ -73,8 +73,7 @@ class TestModelGatewaySwitching(unittest.TestCase):
             "MODEL_GATEWAY_TYPE": "litellm",
             "LITELLM_PROXY_URL": "http://localhost:4000",
             "LITELLM_PROXY_KEY": "sk-litellm-default",
-            "MODEL_LAKE_BASE": "http://192.168.19.238:30888",
-            "AUTH_BASE": "http://192.168.19.238:31401",
+            "MODEL_LAKE_BASE": "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
         }, clear=True):
             self.assertEqual(env.get_model_gateway_type(), "litellm")
             self.assertEqual(env.get_model_gateway_url(), "http://localhost:4000")
@@ -83,18 +82,47 @@ class TestModelGatewaySwitching(unittest.TestCase):
         # 2. 切换 LLM 到 model_lake，Embedding / Reranker 仍走 litellm
         with patch.dict(os.environ, {
             "MODEL_GATEWAY_TYPE": "model_lake",
-            "MODEL_LAKE_BASE": "http://model-lake.company.com",
+            "MODEL_LAKE_BASE": "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+            "MODEL_LAKE_API_KEY": "mn-sk-test-key",
             "LITELLM_PROXY_URL": "http://litellm.internal:4000",
             "LITELLM_PROXY_KEY": "sk-litellm-key",
         }, clear=True):
             self.assertEqual(env.get_model_gateway_type(), "model_lake")
-            self.assertEqual(env.get_model_gateway_url(), "http://model-lake.company.com/model-lake/v1")
-            self.assertIsNone(env.get_model_gateway_key())
+            self.assertEqual(
+                env.get_model_gateway_url(),
+                "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+            )
+            self.assertEqual(env.get_model_gateway_key(), "mn-sk-test-key")
             # Embedding 和 Reranker 走 LiteLLM
             self.assertEqual(env.get_embedding_gateway_url(), "http://litellm.internal:4000")
             self.assertEqual(env.get_embedding_gateway_key(), "sk-litellm-key")
             self.assertEqual(env.get_reranker_gateway_url(), "http://litellm.internal:4000")
             self.assertEqual(env.get_reranker_gateway_key(), "sk-litellm-key")
+
+    def test_normalize_model_lake_api_base(self):
+        """ModelNexus base 原样使用：仅容忍首尾空白与末尾斜杠，不做路径拼接"""
+        from src.utils.env_manager import EnvManager
+
+        with patch.dict(os.environ, {
+            "MODEL_GATEWAY_TYPE": "model_lake",
+            "MODEL_LAKE_BASE": "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+            "LITELLM_PROXY_URL": "http://litellm.internal:4000",
+        }, clear=True):
+            env = EnvManager.__new__(EnvManager)
+            self.assertEqual(
+                env.get_model_gateway_url(),
+                "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+            )
+        # 末尾斜杠被清掉
+        with patch.dict(os.environ, {
+            "MODEL_GATEWAY_TYPE": "model_lake",
+            "MODEL_LAKE_BASE": "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1/",
+        }, clear=True):
+            env = EnvManager.__new__(EnvManager)
+            self.assertEqual(
+                env.get_model_gateway_url(),
+                "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+            )
 
     def test_config_manager_gateway_configs(self):
         """测试 ConfigManager 获取各独立网关配置"""
@@ -102,15 +130,19 @@ class TestModelGatewaySwitching(unittest.TestCase):
 
         with patch.dict(os.environ, {
             "MODEL_GATEWAY_TYPE": "model_lake",
-            "MODEL_LAKE_BASE": "http://model-lake.company.com",
+            "MODEL_LAKE_BASE": "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+            "MODEL_LAKE_API_KEY": "mn-sk-test-key",
             "LITELLM_PROXY_URL": "http://litellm.internal:4000",
             "LITELLM_PROXY_KEY": "sk-litellm-key",
         }, clear=True):
             # LLM 网关
             llm_cfg = cm.get_llm_gateway_full_config()
             self.assertEqual(llm_cfg["gateway_type"], "model_lake")
-            self.assertEqual(llm_cfg["api_base"], "http://model-lake.company.com/model-lake/v1")
-            self.assertIsNone(llm_cfg["api_key"])
+            self.assertEqual(
+                llm_cfg["api_base"],
+                "https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+            )
+            self.assertEqual(llm_cfg["api_key"], "mn-sk-test-key")
 
             # Embedding 网关（走 litellm）
             emb_cfg = cm.get_embedding_gateway_full_config()
@@ -262,26 +294,22 @@ class TestModelGatewaySwitching(unittest.TestCase):
             self.assertEqual(llm_cfg["default_max_retries"], 2)
 
     def test_model_lake_allowed_openai_params_with_reasoning_effort(self):
-        """测试 Model Lake 网关模式下，带思考强度参数构建请求不会被 LiteLLM 抛出 UnsupportedParamsError"""
+        """测试 ModelNexus 网关模式下，带思考强度参数构建请求不会被 LiteLLM 抛出 UnsupportedParamsError"""
         from src.client.llm.client import LLMClient, LLMClientConfig
         import litellm
-        from unittest.mock import MagicMock
 
-        # 模拟 Model Lake 客户端
+        # 模拟 ModelNexus 客户端
         client = LLMClient(
             LLMClientConfig(
                 model="openai/deepseek-official/deepseek-v4-flash",
-                api_base="http://192.168.19.238:30888/model-lake/v1",
-                api_key="ml-test-token",
+                api_base="https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+                api_key="mn-sk-test-token",
             )
         )
-        mock_auth = MagicMock()
-        mock_auth.get_token.return_value = "ml-mock-token"
-        with patch("src.client.llm.model_lake_auth.get_model_lake_auth", return_value=mock_auth):
-            params = client._build_params(
-                [{"role": "user", "content": "你好"}],
-                reasoning_effort="high",
-            )
+        params = client._build_params(
+            [{"role": "user", "content": "你好"}],
+            reasoning_effort="high",
+        )
 
         # 验证 allowed_openai_params 已注入
         self.assertIn("allowed_openai_params", params)
@@ -335,19 +363,16 @@ class TestModelGatewaySwitching(unittest.TestCase):
         client = LLMClient(
             LLMClientConfig(
                 model="openai/deepseek-official/deepseek-v4-flash",
-                api_base="http://192.168.19.238:30888/model-lake/v1",
-                api_key="ml-test-token",
+                api_base="https://modelnexus.jiepeix.com:20443/model-nexus/api/v1",
+                api_key="mn-sk-test-token",
             )
         )
-        mock_auth = MagicMock()
-        mock_auth.get_token.return_value = "ml-mock-token"
-        with patch("src.client.llm.model_lake_auth.get_model_lake_auth", return_value=mock_auth):
-            params = client._build_params(
-                [
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test", "arguments": "{}"}}]},
-                ]
-            )
+        params = client._build_params(
+            [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test", "arguments": "{}"}}]},
+            ]
+        )
         msgs = params["messages"]
         self.assertEqual(msgs[0]["content"], "hello")
         self.assertIsNone(msgs[1]["content"])
