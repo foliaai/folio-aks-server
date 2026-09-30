@@ -182,11 +182,8 @@ class LLMClient:
         try:
             resp = litellm.completion(**params)
         except Exception as e:
-            if self._retry_if_auth_failed(params, e):
-                resp = litellm.completion(**params)
-            else:
-                logger.error(f"[LLM] {self.config.model} sync generate 失败: {e}")
-                raise
+            logger.error(f"[LLM] {self.config.model} sync generate 失败: {e}")
+            raise
         elapsed_ms = (time.perf_counter() - t0) * 1000
         parsed = parse_litellm_response(resp)
         self._log_metrics("sync", parsed, elapsed_ms)
@@ -222,11 +219,8 @@ class LLMClient:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if self._retry_if_auth_failed(params, e):
-                resp = await litellm.acompletion(**params)
-            else:
-                logger.error(f"[LLM] {self.config.model} async generate 失败: {e}")
-                raise
+            logger.error(f"[LLM] {self.config.model} async generate 失败: {e}")
+            raise
         elapsed_ms = (time.perf_counter() - t0) * 1000
         parsed = parse_litellm_response(resp)
         self._log_metrics("async", parsed, elapsed_ms)
@@ -260,12 +254,7 @@ class LLMClient:
         )
         params["stream"] = True
         params["stream_options"] = {"include_usage": True}
-        try:
-            stream = litellm.completion(**params)
-        except Exception as e:
-            if not self._retry_if_auth_failed(params, e):
-                raise
-            stream = litellm.completion(**params)
+        stream = litellm.completion(**params)
         for chunk in stream:
             yield from _yield_stream_chunks(chunk)
 
@@ -302,12 +291,7 @@ class LLMClient:
         )
         params["stream"] = True
         params["stream_options"] = {"include_usage": True}
-        try:
-            resp = await litellm.acompletion(**params)
-        except Exception as e:
-            if not self._retry_if_auth_failed(params, e):
-                raise
-            resp = await litellm.acompletion(**params)
+        resp = await litellm.acompletion(**params)
         async for chunk in resp:  # type: ignore[union-attr]
             for sc in _yield_stream_chunks(chunk):
                 yield sc
@@ -367,7 +351,6 @@ class LLMClient:
             params["api_base"] = cfg.api_base
         if cfg.api_key:
             params["api_key"] = cfg.api_key
-        self._apply_model_lake_auth(params)
 
         if tools:
             params["tools"] = tools
@@ -427,28 +410,6 @@ class LLMClient:
 
         return params
 
-    def _apply_model_lake_auth(self, params: Dict[str, Any], *, force_refresh: bool = False) -> None:
-        """Model Lake：每次请求注入最新 Bearer（静态 ml-/JWT 或换票后的 Service JWT）。"""
-        from src.client.llm.model_lake_auth import get_model_lake_auth, is_model_lake_gateway
-
-        if not is_model_lake_gateway(_get_default_gateway_type()):
-            return
-        params["api_key"] = get_model_lake_auth().get_token(force_refresh=force_refresh)
-
-    def _retry_if_auth_failed(self, params: Dict[str, Any], exc: BaseException) -> bool:
-        from src.client.llm.model_lake_auth import (
-            get_model_lake_auth,
-            is_model_lake_gateway,
-            looks_like_auth_failure,
-        )
-
-        if not is_model_lake_gateway(_get_default_gateway_type()) or not looks_like_auth_failure(exc):
-            return False
-        logger.warning(f"[LLM] Model Lake 鉴权失败，刷新凭证后重试一次: {exc}")
-        get_model_lake_auth().invalidate()
-        self._apply_model_lake_auth(params, force_refresh=True)
-        return True
-
     def _log_metrics(self, mode: str, resp: LLMResponse, elapsed_ms: float) -> None:
         usage = resp.usage
         logger.debug(
@@ -477,7 +438,8 @@ def _proxy_defaults() -> Dict[str, Any]:
       2) ``ConfigManager.get_llm_gateway_full_config(env_manager)``：
          - ``gateway_type`` 取 ``.env: MODEL_GATEWAY_TYPE``（默认 litellm）
          - ``api_base`` 取 ``.env: MODEL_LAKE_BASE / LITELLM_PROXY_URL``
-         - ``api_key``  取 ``.env: LITELLM_PROXY_KEY``（Model Lake 使用 Service JWT）
+         - ``api_key``  取 ``.env: MODEL_LAKE_API_KEY / LITELLM_PROXY_KEY``
+           （ModelNexus 网关为静态 mn-sk- Key，直接作 Bearer 使用）
          - ``timeout`` / ``max_retries`` 取 ``.env: MODEL_GATEWAY_TIMEOUT / MODEL_GATEWAY_MAX_RETRIES``
     单例失败时降级为返回空字典，避免阻断单元测试 / 离线场景。
     """

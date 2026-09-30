@@ -12,8 +12,12 @@
 
     1. **拉取真相源**：调用 ``<gateway_base>/v1/models``。LiteLLM 的
        ``/v1/model/info`` 只补上下文长度，不再按 ``mode`` 过滤。
-    2. **档案白名单**：``profiles/<name>/models.toml`` 的 ``visible`` 决定前端
-       对话主模型；``[presets]`` 只服务后台组件，不进入下拉。
+    2. **前端可见性**：litellm 档案用 ``visible`` 白名单；model_lake（ModelNexus）
+       从 ``/v1/models`` 富元数据（OpenRouter 风格模型卡片）**自动合成**能力声明
+       ——思考开关/档位、多模态、上下文长度，默认全部可见，仅受 ``[hidden]``
+       黑名单与 ``deprecated_at`` 过滤；``[presets]`` 只服务后台组件并做存在性校验。
+       合成的思考声明会整体替换运行时翻译字典（``resolve_reasoning_effort``
+       等接口的数据源），前端展示与后端翻译天然同源。
     3. **TTL 缓存**：5 分钟内复用上一次结果；网关失败时复用上次成功结果，
        否则返回空列表，不编造兜底模型。
 
@@ -553,9 +557,6 @@ class LiteLLMRegistry:
         api_base = (cfg.get("api_base") or "").strip()
         api_key = (cfg.get("api_key") or "").strip()
         gateway_type = (cfg.get("gateway_type") or "litellm").strip().lower()
-        from src.client.llm.model_lake_auth import get_model_lake_auth, is_model_lake_gateway
-        if is_model_lake_gateway(gateway_type):
-            api_key = get_model_lake_auth().get_token()
         if not api_base:
             raise RuntimeError(
                 "未配置 LLM 模型网关 api_base（检查 .env: MODEL_LAKE_BASE / LITELLM_PROXY_URL）"
@@ -575,9 +576,6 @@ class LiteLLMRegistry:
 
         with httpx.Client(timeout=self.HTTP_TIMEOUT_SECONDS) as client:
             resp = client.get(url, headers=headers)
-            if resp.status_code == 401 and is_model_lake_gateway(gateway_type):
-                headers["Authorization"] = f"Bearer {get_model_lake_auth().get_token(force_refresh=True)}"
-                resp = client.get(url, headers=headers)
             resp.raise_for_status()
             payload = resp.json()
 
@@ -595,6 +593,10 @@ class LiteLLMRegistry:
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[LiteLLMRegistry] {info_url} 不可用: {e}")
 
+        if gateway_type in LiteLLMRegistry.MODEL_LAKE_GATEWAY_TYPES:
+            return self._fetch_model_lake(payload, info_map, gateway_type)
+
+        from src.utils.config_profile import load_profile_visible_models
         parsed = self._parse_models_response(
             payload,
             info_map,
@@ -603,11 +605,123 @@ class LiteLLMRegistry:
             self._long_context_map,
             gateway_type=gateway_type,
         )
-        from src.utils.config_profile import load_profile_visible_models
         return self._filter_visible_models(parsed, load_profile_visible_models())
+
+    def _fetch_model_lake(
+        self,
+        payload: Any,
+        info_map: Dict[str, Dict[str, Any]],
+        gateway_type: str,
+    ) -> List[LLMModelInfo]:
+        """ModelNexus：能力声明从 ``/v1/models`` 富字段合成，档案只留 presets/hidden。
+
+        富字段（OpenRouter 风格模型卡片）与能力声明的对应：
+        - ``supported_parameters`` 含 ``reasoning`` / ``reasoning_effort`` -> 思考开关 / 强度
+          （档位枚举网关不提供，由 ``thinking_adapter.infer_thinking_level_map``
+          按厂商规则推导；仅开关的模型用 off/medium 两档）
+        - ``architecture.input_modalities`` 含 ``image`` -> 多模态
+        - ``context_length`` -> 最大上下文
+        - ``deprecated_at`` 非空 -> 已弃用，直接过滤（不进前端也不进合成）
+        """
+        from src.client.llm.thinking_adapter import (
+            infer_default_thinking_level,
+            infer_thinking_level_map,
+        )
+        from src.utils.config_profile import load_profile_hidden_models
+
+        thinking_specs: Dict[str, ThinkingModelSpec] = {}
+        multimodal_set: Set[str] = set()
+        long_ctx_map: Dict[str, int] = {}
+        valid_ids: List[str] = []
+        fresh_payload: Dict[str, Any] = {"data": []}
+        for it in (payload or {}).get("data") or []:
+            if not isinstance(it, dict):
+                continue
+            mid = it.get("id")
+            if not isinstance(mid, str) or not mid.strip():
+                continue
+            if it.get("deprecated_at"):
+                logger.warning(
+                    f"[LiteLLMRegistry] 跳过已弃用模型: {mid} "
+                    f"(deprecated_at={it.get('deprecated_at')})"
+                )
+                continue
+            valid_ids.append(mid)
+            fresh_payload["data"].append(it)
+
+            # 声明 key 双写：网关原始路由（channel/model）+ 最后一段裸名，
+            # 与 _lookup_thinking_spec 的多形态查找兼容
+            bare = LiteLLMRegistry._bare_model_name(mid)
+            sp = it.get("supported_parameters") or []
+            if "reasoning" in sp or "reasoning_effort" in sp:
+                if "reasoning_effort" in sp:
+                    level_map = infer_thinking_level_map(mid)
+                    spec = ThinkingModelSpec(
+                        reasoning=True,
+                        supports_thinking_effort=True,
+                        default=infer_default_thinking_level(level_map) or "medium",
+                        thinking_level_map=level_map,
+                    )
+                else:
+                    spec = ThinkingModelSpec(
+                        reasoning=True, supports_thinking_effort=False,
+                    )
+                thinking_specs[mid] = spec
+                if bare and bare != mid:
+                    thinking_specs[bare] = spec
+            arch = it.get("architecture") or {}
+            if "image" in (arch.get("input_modalities") or []):
+                multimodal_set.add(mid)
+                if bare and bare != mid:
+                    multimodal_set.add(bare)
+            ctx = it.get("context_length")
+            if isinstance(ctx, int) and ctx > 0:
+                long_ctx_map[bare] = ctx
+                long_ctx_map[mid] = ctx
+
+        # 运行时翻译数据源切换：整体替换（CPython 属性赋值原子，读侧
+        # peek/resolve 拿到旧或新 dict 均自洽）。注意 list_models 持有
+        # self._lock 期间调用本方法，这里不能再抢同一把不可重入锁。
+        self._thinking_models = thinking_specs
+        self._thinking_names = set(thinking_specs.keys())
+        self._multimodal_models = multimodal_set
+        self._long_context_map = long_ctx_map
+
+        parsed = self._parse_models_response(
+            fresh_payload, info_map, thinking_specs, multimodal_set, long_ctx_map,
+            gateway_type=gateway_type,
+        )
+        visible = self._filter_hidden_models(parsed, load_profile_hidden_models())
+        self._validate_presets(valid_ids)
+        return visible
+
+    def _validate_presets(self, valid_ids: List[str]) -> None:
+        """校验档案 presets 指向的模型在网关清单中（存在且未弃用）。
+
+        失配不抛异常阻断服务，只打 error 日志——把内部 pipeline 的运行时
+        失败提前暴露为部署期可见的日志。
+        """
+        from src.utils.config_profile import load_profile_preset_models
+
+        try:
+            presets = load_profile_preset_models()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[LiteLLMRegistry] 读取 presets 失败，跳过校验: {e}")
+            return
+        valid = {LiteLLMRegistry._strip_gateway_prefix(v) for v in valid_ids}
+        for role, model in presets.items():
+            key = LiteLLMRegistry._strip_gateway_prefix(model)
+            if key not in valid:
+                logger.error(
+                    f"[LiteLLMRegistry] preset '{role}' 指向的模型 '{model}' "
+                    f"不在网关模型清单（不存在或已弃用），相关内部调用将失败"
+                )
 
     # LiteLLM SDK 走 proxy 的官方前缀
     PROXY_MODEL_PREFIX = "litellm_proxy/"
+
+    # OpenAI 兼容网关（ModelNexus）类型集合：走富元数据自动合成分支
+    MODEL_LAKE_GATEWAY_TYPES = frozenset({"model_lake", "openai", "openai_compatible"})
 
     @staticmethod
     def _parse_models_response(
@@ -670,7 +784,14 @@ class LiteLLMRegistry:
                 ),
             )
 
-        out.sort(key=lambda m: m.label.lower())
+        # 展示名统一用去掉 channel 前缀的裸模型名（如 deepseek/deepseek-v4.1-flash
+        # -> deepseek-v4.1-flash）；排序先按 provider（channel）分组、组内按
+        # 名称排序——同厂商模型相邻展示。
+        for m in out:
+            bare = LiteLLMRegistry._bare_model_name(m.id)
+            if bare:
+                m.label = bare
+        out.sort(key=lambda m: (m.provider.lower(), m.label.lower()))
         return out
 
     @staticmethod
@@ -686,12 +807,12 @@ class LiteLLMRegistry:
         thinking_specs: Dict[str, ThinkingModelSpec],
         model: str,
     ) -> Optional[ThinkingModelSpec]:
-        """按多种命名形态查思考声明，与档案里两种写法兼容。
+        """按多种命名形态查思考声明，与声明 key 的双写形态（routed + bare）兼容。
 
-        Model Lake 档案常写 ``channel/model``（如 ``deepseek-official/deepseek-v4-flash``），
-        也有只写最后一段的（如 ``ali-qwen3-7-flash``）。调用侧则可能传入
-        ``openai/<channel>/<model>``、``channel/model`` 或最后一段裸名。
-        只查 ``_bare_model_name`` 会让 DeepSeek / GLM / MiMo 这类 channel 键全部 miss，
+        model_lake（ModelNexus）声明由接口合成，key 双写 ``channel/model``
+        （如 ``deepseek/deepseek-v4.1-flash``）与最后一段裸名（如 ``glm-5.3``）。
+        调用侧则可能传入 ``openai/<channel>/<model>``、``channel/model``
+        或最后一段裸名。只查 ``_bare_model_name`` 会让 channel 键全部 miss，
         前端仍显示支持思考，实际请求却被钳成 off。
         """
         raw = (model or "").strip()
@@ -709,21 +830,44 @@ class LiteLLMRegistry:
         models: List[LLMModelInfo],
         allow_list: Optional[List[str]] = None,
     ) -> List[LLMModelInfo]:
-        """按档案 ``visible`` 白名单过滤，并保持白名单书写顺序。"""
+        """按档案 ``visible`` 白名单过滤，保持解析层的分组排序。
+
+        展示顺序统一由 ``_parse_models_response`` 决定（provider 分组、
+        组内按名称）；白名单只做可见性筛选，不再决定顺序。
+        """
         if not allow_list:
             return []
-        order: Dict[str, int] = {}
-        for idx, raw in enumerate(allow_list):
-            key = LiteLLMRegistry._strip_gateway_prefix(str(raw))
-            if key and key not in order:
-                order[key] = idx
-        selected: List[LLMModelInfo] = []
-        for model in models:
-            key = LiteLLMRegistry._strip_gateway_prefix(model.id)
-            if key in order:
-                selected.append(model)
-        selected.sort(key=lambda m: order.get(LiteLLMRegistry._strip_gateway_prefix(m.id), 10**9))
-        return selected
+        allow = {
+            LiteLLMRegistry._strip_gateway_prefix(str(raw))
+            for raw in allow_list
+            if str(raw).strip()
+        }
+        return [
+            m for m in models
+            if LiteLLMRegistry._strip_gateway_prefix(m.id) in allow
+        ]
+
+    @staticmethod
+    def _filter_hidden_models(
+        models: List[LLMModelInfo],
+        hidden_list: Optional[List[str]] = None,
+    ) -> List[LLMModelInfo]:
+        """model_lake：默认全部可见，仅剔除档案 ``[hidden]`` 黑名单（空=全可见）。
+
+        与 ``_filter_visible_models`` 的白名单语义相对：网关 ``/v1/models``
+        即真相源，档案只做"不想暴露"的减法，不再逐个登记。
+        """
+        if not hidden_list:
+            return list(models)
+        hidden = {
+            LiteLLMRegistry._strip_gateway_prefix(str(h))
+            for h in hidden_list
+            if str(h).strip()
+        }
+        return [
+            m for m in models
+            if LiteLLMRegistry._strip_gateway_prefix(m.id) not in hidden
+        ]
 
     @staticmethod
     def _infer_provider(bare_name: str, default: str = "litellm_proxy") -> str:
