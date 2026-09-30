@@ -654,8 +654,16 @@ class LiteLLMRegistry:
             bare = LiteLLMRegistry._bare_model_name(mid)
             sp = it.get("supported_parameters") or []
             if "reasoning" in sp or "reasoning_effort" in sp:
-                if "reasoning_effort" in sp:
-                    level_map = infer_thinking_level_map(mid)
+                # 本地厂商规则优先：网关声明 reasoning_effort 只是必要条件，
+                # infer 返回 None 表示本地明确判定该模型仅支持思考开关
+                # （如 Qwen 3.5/3.7、GLM 5.1 及以下）——即使网关标了
+                # effort 也按开关式处理，展示与 adapter 实际行为保持一致。
+                level_map = (
+                    infer_thinking_level_map(mid)
+                    if "reasoning_effort" in sp
+                    else None
+                )
+                if level_map is not None:
                     spec = ThinkingModelSpec(
                         reasoning=True,
                         supports_thinking_effort=True,

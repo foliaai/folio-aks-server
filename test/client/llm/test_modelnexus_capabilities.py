@@ -50,6 +50,8 @@ _MOCK_PAYLOAD = {
         _nexus_model("deepseek/deepseek-v4-flash", deprecated="2026-09-29T16:00:00Z"),
         _nexus_model("local/qwen3.6", reasoning=False, ctx=256000),
         _nexus_model("moonshotai/kimi-k3", modalities=("text", "image", "video"), effort=True),
+        # 网关误标 effort：本地厂商规则否决，应显示为开关式（仅 off/medium）
+        _nexus_model("qwen/qwen3.5-flash", modalities=("text", "image", "video"), effort=True),
         _nexus_model("qwen/qwen3.7-flash", modalities=("text", "image", "video")),
         _nexus_model("qwen/qwen3.8-max", modalities=("text", "image", "video"), effort=True),
         _nexus_model("z-ai/glm-5.3", effort=True),
@@ -94,10 +96,30 @@ class TestInferThinkingLevelMap(unittest.TestCase):
         self.assertEqual(m["high"], "high")
         self.assertIsNone(m["max"])
 
-    def test_unknown_vendor_passthrough(self):
+    def test_kimi_native_levels(self):
+        """Kimi K3：始终推理（off=null 归位 low），原生档 low/high/max"""
         m = infer_thinking_level_map("moonshotai/kimi-k3")
+        self.assertIsNone(m["off"])
+        self.assertEqual(m["low"], "low")
+        self.assertEqual(m["high"], "high")
+        self.assertEqual(m["max"], "max")
+        self.assertIsNone(m["medium"])
+        self.assertIsNone(m["xhigh"])
+
+    def test_unknown_vendor_passthrough(self):
+        m = infer_thinking_level_map("unknown-vendor/some-model-x")
         self.assertEqual(m["off"], "none")
         self.assertEqual(m["max"], "max")      # 全档透传
+
+    def test_local_rules_override_toggle_only(self):
+        """本地规则明确判定仅开关的模型返回 None（优先于网关 effort 声明）"""
+        self.assertIsNone(infer_thinking_level_map("qwen/qwen3.5-flash"))
+        self.assertIsNone(infer_thinking_level_map("qwen/qwen3.7-flash"))
+        self.assertIsNone(infer_thinking_level_map("z-ai/glm-5.1"))
+        self.assertIsNone(infer_thinking_level_map("xiaomi-mimo/xiaomi-mimo-v2-5"))
+        # 3.8 / 5.3 / 5.2 等强度模型不受影响
+        self.assertIsNotNone(infer_thinking_level_map("qwen/qwen3.8-max"))
+        self.assertIsNotNone(infer_thinking_level_map("z-ai/glm-5.3"))
 
     def test_prefix_stripped(self):
         self.assertEqual(
@@ -132,9 +154,9 @@ class TestFetchModelLake(unittest.TestCase):
         reg = self._registry()
         visible = reg._fetch_model_lake(_MOCK_PAYLOAD, {}, "model_lake")
 
-        # 7 个 mock 模型 - 1 弃用 - 1 命中档案黑名单(local/qwen3.6) = 5 个可见
+        # 8 个 mock 模型 - 1 弃用 - 1 命中档案黑名单(local/qwen3.6) = 6 个可见
         ids = [m.id for m in visible]
-        self.assertEqual(len(visible), 5)
+        self.assertEqual(len(visible), 6)
         self.assertNotIn("openai/deepseek/deepseek-v4-flash", ids)
         self.assertNotIn("openai/local/qwen3.6", ids)
         self.assertIn("openai/deepseek/deepseek-v4.1-flash", ids)
@@ -161,6 +183,20 @@ class TestFetchModelLake(unittest.TestCase):
         qwen = by_id["openai/qwen/qwen3.7-flash"]
         self.assertTrue(qwen.supports_thinking)
         self.assertEqual(qwen.thinking_levels, ["off", "medium"])
+
+        # 本地规则否决网关 effort 声明：qwen3.5 网关标了 effort，
+        # 但 Qwen 3.5 官方仅思考开关——展示必须与 adapter 行为一致
+        qwen35 = by_id["openai/qwen/qwen3.5-flash"]
+        self.assertTrue(qwen35.supports_thinking)
+        self.assertEqual(qwen35.thinking_levels, ["off", "medium"])
+        self.assertEqual(reg.resolve_reasoning_effort("openai/qwen/qwen3.5-flash", "medium"), "enabled")
+
+        # Kimi K3：始终推理不可关（前端无 off 档），low/high/max
+        kimi = by_id["openai/moonshotai/kimi-k3"]
+        self.assertTrue(kimi.supports_thinking)
+        self.assertEqual(kimi.thinking_levels, ["low", "high", "max"])
+        self.assertEqual(kimi.default_thinking_level, "high")
+        self.assertEqual(reg.resolve_reasoning_effort("openai/moonshotai/kimi-k3", "low"), "low")
 
         # 多模态：input_modalities 含 image
         self.assertTrue(by_id["openai/qwen/qwen3.7-flash"].supports_multimodal)
