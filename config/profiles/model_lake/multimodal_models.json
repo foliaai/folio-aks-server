@@ -1,8 +1,0 @@
-{
-  "_comment": "Model Lake 档案：支持读图的模型（/v1/models 最后一段）。",
-  "models": [
-    "ali-qwen3-7-flash",
-    "ali-qwen3-7-plus",
-    "xiaomi-mimo/xiaomi-mimo-v2-5"
-  ]
-}

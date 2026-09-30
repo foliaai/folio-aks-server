@@ -19,18 +19,6 @@ from dotenv import load_dotenv
 from loguru import logger
 
 
-def normalize_model_lake_api_base(raw: str) -> str:
-    """把 ``MODEL_LAKE_BASE``（host）或已含前缀的 URL 归一成 ``{host}/model-lake/v1``。"""
-    base = (raw or "").strip().rstrip("/")
-    if not base:
-        return base
-    if base.endswith("/model-lake/v1"):
-        return base
-    if base.endswith("/model-lake"):
-        return f"{base}/v1"
-    return f"{base}/model-lake/v1"
-
-
 class EnvManager:
     """环境变量管理器"""
     
@@ -366,11 +354,9 @@ class EnvManager:
     #    - MODEL_GATEWAY_TIMEOUT: 客户端默认超时秒数（默认 60）
     #    - MODEL_GATEWAY_MAX_RETRIES: 客户端默认重试次数（默认 2）
     #
-    # 2. Model Lake 动态换票凭证：
-    #    - MODEL_LAKE_BASE   : Model Lake 服务根地址（自动补全 /model-lake/v1）
-    #    - AUTH_BASE         : Auth 认证服务根地址（POST {AUTH_BASE}/auth/client/token 换取 Service JWT）
-    #    - AUTH_CLIENT_ID    : 客户端 ID
-    #    - AUTH_CLIENT_SECRET: 客户端 Secret
+    # 2. ModelNexus 网关（OpenAI 兼容协议，静态 Key）：
+    #    - MODEL_LAKE_BASE   : 网关完整 base，必须配到 /v1 结尾（原样使用，不做拼接）
+    #    - MODEL_LAKE_API_KEY: 静态 API Key（mn-sk- 开头，Bearer 直接携带）
     #
     # 3. LiteLLM Proxy 网关（Embedding / Reranker 专用网关，以及未配置 Model Lake 时的 LLM 网关）：
     #    - LITELLM_PROXY_URL : LiteLLM Proxy base URL
@@ -389,26 +375,27 @@ class EnvManager:
     def get_model_gateway_url(self) -> Optional[str]:
         """获取大模型网关 base URL。
 
-        - model_lake (及 openai/openai_compatible): 取 MODEL_LAKE_BASE 并规范化（自动补 /model-lake/v1）
+        - model_lake (及 openai/openai_compatible): 取 MODEL_LAKE_BASE（必须配到 /v1 结尾，原样使用）
         - litellm: 取 LITELLM_PROXY_URL
         """
         raw_type = self.get_model_gateway_type()
         if raw_type in ("model_lake", "openai", "openai_compatible"):
             ml_base = self.get("MODEL_LAKE_BASE")
             if ml_base and ml_base.strip():
-                return normalize_model_lake_api_base(ml_base)
+                return ml_base.strip().rstrip("/")
             return None
         return self.get("LITELLM_PROXY_URL")
 
     def get_model_gateway_key(self) -> Optional[str]:
         """获取大模型网关 API Key。
 
-        - model_lake 走 Auth 动态换取 Service JWT（由 ModelLakeAuthProvider 注入），静态 Key 返回 None
+        - model_lake: 静态 Key ``MODEL_LAKE_API_KEY``（mn-sk- 开头）
         - litellm 返回 LITELLM_PROXY_KEY
         """
         raw_type = self.get_model_gateway_type()
         if raw_type in ("model_lake", "openai", "openai_compatible"):
-            return None
+            raw = self.get("MODEL_LAKE_API_KEY")
+            return raw.strip() if raw and raw.strip() else None
         return self.get("LITELLM_PROXY_KEY")
 
     def get_model_gateway_timeout(self, default: float = 60.0) -> float:
@@ -436,29 +423,6 @@ class EnvManager:
                 f"环境变量 MODEL_GATEWAY_MAX_RETRIES 无法转换为整数: {raw}，使用默认值 {default}"
             )
             return default
-
-    def get_auth_base(self) -> Optional[str]:
-        """Auth 服务根地址（不含 ``/auth/client/token``）。"""
-        raw = self.get("AUTH_BASE")
-        return raw.strip().rstrip("/") if raw and raw.strip() else None
-
-    def get_auth_client_id(self) -> Optional[str]:
-        raw = self.get("AUTH_CLIENT_ID")
-        return raw.strip() if raw and raw.strip() else None
-
-    def get_auth_client_secret(self) -> Optional[str]:
-        raw = self.get("AUTH_CLIENT_SECRET")
-        return raw.strip() if raw and raw.strip() else None
-
-    def get_auth_client_token_url(self) -> Optional[str]:
-        """Service JWT 换票地址：``{AUTH_BASE}/auth/client/token``。"""
-        base = self.get_auth_base()
-        if not base:
-            return None
-        return f"{base}/auth/client/token"
-
-    def has_auth_client_credentials(self) -> bool:
-        return bool(self.get_auth_client_token_url() and self.get_auth_client_id() and self.get_auth_client_secret())
 
     def get_embedding_gateway_url(self) -> Optional[str]:
         """获取 Embedding 模型网关 URL（走 LiteLLM Proxy）"""

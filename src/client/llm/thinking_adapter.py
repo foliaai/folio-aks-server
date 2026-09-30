@@ -26,7 +26,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
@@ -104,8 +104,9 @@ class BaseThinkingAdapter(ABC):
 class OpenAIThinkingAdapter(BaseThinkingAdapter):
     """OpenAI 系列（o1, o3-mini, o4 等）
 
-    原生参数格式：reasoning_effort ("low" | "medium" | "high")
-    注意：OpenAI 原生推理模型不支持完全关闭思考，若请求 off 则归位到 low。
+    原生参数格式：reasoning_effort ("low" | "medium" | "high")。
+    注意：OpenAI 原生推理模型不支持完全关闭思考，off 归位到 low。
+    档位分派统一查 ``_OPENAI_LEVEL_MAP``（单一事实源）。
     """
 
     def adapt(
@@ -118,13 +119,12 @@ class OpenAIThinkingAdapter(BaseThinkingAdapter):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         level = self._normalize_level(level_or_effort)
-        if level in ("off", "minimal", "low"):
-            effort = "low"
-        elif level == "medium":
-            effort = "medium"
-        else:
-            effort = "high"
-        return {"reasoning_effort": effort}
+        if level == "off":
+            return {"reasoning_effort": "low"}
+        effort = resolve_native_effort(
+            infer_thinking_level_map(model), level, default="high",
+        )
+        return {"reasoning_effort": effort or "high"}
 
 
 class DeepSeekThinkingAdapter(BaseThinkingAdapter):
@@ -132,15 +132,9 @@ class DeepSeekThinkingAdapter(BaseThinkingAdapter):
 
     官方规范（OpenAI SDK / Chat Completion）:
     - 思考开关：extra_body: {"thinking": {"type": "enabled" | "disabled"}}
-    - 思考强度：reasoning_effort ("low" | "high" | "max")
-      映射规则（deepseek-v4-flash 与 deepseek-v4-pro 一致）:
-        low    -> low
-        medium -> high
-        high   -> high
-        xhigh  -> high
-        max    -> max
-    - off 档位：
-        reasoning_effort="none", extra_body={"thinking": {"type": "disabled"}}
+    - 思考强度：reasoning_effort ("low" | "high" | "max")，原生档查
+      ``_DEEPSEEK_LEVEL_MAP``（单一事实源）
+    - off 档位：reasoning_effort="none", extra_body={"thinking": {"type": "disabled"}}
     """
 
     def adapt(
@@ -160,19 +154,11 @@ class DeepSeekThinkingAdapter(BaseThinkingAdapter):
                 "extra_body": extra_body,
             }
 
-        # 官方映射表：low -> low; medium/high/xhigh -> high; max -> max; minimal -> low
-        effort_map = {
-            "minimal": "low",
-            "low": "low",
-            "medium": "high",
-            "high": "high",
-            "xhigh": "high",
-            "max": "max",
-        }
-        effort = effort_map.get(level, "high")
-
+        effort = resolve_native_effort(
+            infer_thinking_level_map(model), level, default="high",
+        )
         return {
-            "reasoning_effort": effort,
+            "reasoning_effort": effort or "high",
             "extra_body": extra_body,
         }
 
@@ -233,7 +219,7 @@ class QwenThinkingAdapter(BaseThinkingAdapter):
         is_qwen_38 = "3.8" in bare_model or "qwen3.8" in bare_model or "qwen-3.8" in bare_model
 
         if is_qwen_38:
-            # Qwen 3.8 系列：仅支持 reasoning_effort (low/medium/xhigh)，严禁下发 thinking_budget
+            # Qwen 3.8 系列：原生档 low/medium/xhigh 查 _QWEN38_LEVEL_MAP（单一事实源）
             if level == "off":
                 return {
                     "reasoning_effort": "none",
@@ -243,17 +229,11 @@ class QwenThinkingAdapter(BaseThinkingAdapter):
                     },
                 }
 
-            effort_map_38 = {
-                "minimal": "low",
-                "low": "low",
-                "medium": "medium",
-                "high": "xhigh",
-                "xhigh": "xhigh",
-                "max": "xhigh",
-            }
-            effort = effort_map_38.get(level, "xhigh")
+            effort = resolve_native_effort(
+                infer_thinking_level_map(model), level, default="xhigh",
+            )
             return {
-                "reasoning_effort": effort,
+                "reasoning_effort": effort or "xhigh",
                 "extra_body": {
                     "enable_thinking": True,
                     "thinking": {"type": "enabled"},
@@ -322,7 +302,8 @@ class GLMThinkingAdapter(BaseThinkingAdapter):
         if "/" in bare:
             bare = bare.split("/", 1)[1]
 
-        # 1. GLM-5.3 规则（仅支持 max, high, low）
+        # 1. GLM-5.3 规则（原生档 low/high/max 查 _GLM53_LEVEL_MAP，单一事实源；
+        #    官方不认 reasoning_effort="none"，off/minimal 特例转 low+disabled）
         if "glm-5.3" in bare or "glm-53" in bare or "5.3" in bare:
             if level in ("off", "minimal"):
                 return {
@@ -331,22 +312,17 @@ class GLMThinkingAdapter(BaseThinkingAdapter):
                         "thinking": {"type": "disabled"},
                     },
                 }
-            effort_map = {
-                "low": "low",
-                "medium": "high",
-                "high": "high",
-                "xhigh": "max",
-                "max": "max",
-            }
-            effort = effort_map.get(level, "high")
+            effort = resolve_native_effort(
+                infer_thinking_level_map(model), level, default="high",
+            )
             return {
-                "reasoning_effort": effort,
+                "reasoning_effort": effort or "high",
                 "extra_body": {
                     "thinking": {"type": "enabled"},
                 },
             }
 
-        # 2. GLM-5.2 规则（支持 none/minimal, low/medium->high, high->high, xhigh/max->max）
+        # 2. GLM-5.2 规则（原生档 none/high/max 查 _GLM52_LEVEL_MAP，单一事实源）
         if "glm-5.2" in bare or "glm-52" in bare or "5.2" in bare:
             if level in ("off", "minimal"):
                 return {
@@ -355,16 +331,11 @@ class GLMThinkingAdapter(BaseThinkingAdapter):
                         "thinking": {"type": "disabled"},
                     },
                 }
-            effort_map = {
-                "low": "high",
-                "medium": "high",
-                "high": "high",
-                "xhigh": "max",
-                "max": "max",
-            }
-            effort = effort_map.get(level, "high")
+            effort = resolve_native_effort(
+                infer_thinking_level_map(model), level, default="high",
+            )
             return {
-                "reasoning_effort": effort,
+                "reasoning_effort": effort or "high",
                 "extra_body": {
                     "thinking": {"type": "enabled"},
                 },
@@ -576,6 +547,157 @@ def get_thinking_adapter(model: str) -> BaseThinkingAdapter:
         return OpenAIThinkingAdapter()
 
     return DefaultThinkingAdapter()
+
+
+# ============================================================
+# ============================================================
+# pi 档位 → effort 字符串 反查表（ModelNexus / model_lake 网关专用）
+# ============================================================
+#
+# ModelNexus 的 /v1/models 只声明模型是否支持 reasoning / reasoning_effort
+# 参数，不给出档位枚举（实测连非法档位都不校验）。以下映射是各厂商档位
+# 规格的**唯一事实源**：前端可选档（registry 合成 spec）与请求参数构造
+# （各 ThinkingAdapter.adapt 的档位分派）都通过 infer_thinking_level_map /
+# resolve_native_effort 查这里的表——改厂商档位规格只改表，行为自动一致。
+# 遵循与老 thinking_models.json 相同的"严格原生档"哲学：map 只登记厂商
+# 原生支持的档位（值非空），非原生档置 None（前端不展示，传入时由就近
+# 归位落到最近原生档）。值为传给 adapter 的 effort 字符串（"none" 会被
+# 各家 adapter 归一为 off 分支）。
+
+# 开关式（不支持强度）：off=显式关，medium="enabled" 哨兵（各家按"开"处理）
+_TOGGLE_LEVEL_MAP: Dict[str, Optional[str]] = {"off": "none", "medium": "enabled"}
+
+# DeepSeek 原生档：low / high / max
+_DEEPSEEK_LEVEL_MAP: Dict[str, Optional[str]] = {
+    "off": "none", "minimal": None, "low": "low",
+    "medium": None, "high": "high", "xhigh": None, "max": "max",
+}
+
+# Qwen 3.8 原生档：low / medium / xhigh（严禁与 thinking_budget 同设）
+_QWEN38_LEVEL_MAP: Dict[str, Optional[str]] = {
+    "off": "none", "minimal": None, "low": "low",
+    "medium": "medium", "high": None, "xhigh": "xhigh", "max": None,
+}
+
+# GLM-5.3 原生档：low / high / max（不支持 none；off 经 adapter 转 low+disabled）
+_GLM53_LEVEL_MAP: Dict[str, Optional[str]] = {
+    "off": "none", "minimal": None, "low": "low",
+    "medium": None, "high": "high", "xhigh": None, "max": "max",
+}
+
+# GLM-5.2 原生档：none / high / max
+_GLM52_LEVEL_MAP: Dict[str, Optional[str]] = {
+    "off": "none", "minimal": None, "low": None,
+    "medium": None, "high": "high", "xhigh": None, "max": "max",
+}
+
+# OpenAI o 系 / gpt 原生档：low / medium / high，推理不可完全关闭
+_OPENAI_LEVEL_MAP: Dict[str, Optional[str]] = {
+    "off": None, "minimal": None, "low": "low",
+    "medium": "medium", "high": "high", "xhigh": None, "max": None,
+}
+
+# Anthropic / Gemini：budget 型，全档可用（具体预算由 adapter 按档位计算）
+_BUDGET_LEVEL_MAP: Dict[str, Optional[str]] = {
+    "off": "none", "minimal": "minimal", "low": "low",
+    "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max",
+}
+
+# 厂商规则未覆盖（如 kimi-k3）：网关已声明支持 effort，全档透传档位名，
+# 由上游宽容处理（链路无档位校验，实测非法值不报错）
+_PASSTHROUGH_LEVEL_MAP: Dict[str, Optional[str]] = dict(_BUDGET_LEVEL_MAP)
+
+
+def infer_thinking_level_map(model: str) -> Dict[str, Optional[str]]:
+    """按厂商规则推导「pi 档位 → 传给 ThinkingAdapter 的 effort 字符串」映射。
+
+    调用前提：网关 /v1/models 的 ``supported_parameters`` 已声明该模型支持
+    ``reasoning_effort``（仅支持 ``reasoning`` 开关的模型不进本函数，registry
+    直接用 ``_TOGGLE_LEVEL_MAP``）。返回值供合成 ``ThinkingModelSpec``：
+    - 字符串：registry 翻译层透传，adapter 收到后归一分派到对应分支
+    - ``None``：该档不支持，前端不展示（clamp 自动归位）
+    厂商规则不认识但网关声明支持 effort 的模型返回全档透传表。
+
+    **本函数与下方映射表是厂商档位规格的唯一事实源**：前端展示（registry
+    合成 spec）、请求参数构造（各 ThinkingAdapter.adapt 分派）都查这里的
+    表，改档位规格只改表。
+    """
+    bare = (model or "").lower().strip()
+    for prefix in ("litellm_proxy/", "openai/"):
+        if bare.startswith(prefix):
+            bare = bare[len(prefix):]
+    if "/" in bare:
+        bare = bare.split("/", 1)[1]
+
+    if "deepseek" in bare:
+        return dict(_DEEPSEEK_LEVEL_MAP)
+    if "qwen" in bare or "qwq" in bare:
+        if "3.8" in bare or "qwen3.8" in bare or "qwen-3.8" in bare:
+            return dict(_QWEN38_LEVEL_MAP)
+        return dict(_PASSTHROUGH_LEVEL_MAP)
+    if "glm" in bare or "chatglm" in bare:
+        if "5.3" in bare or "glm-53" in bare:
+            return dict(_GLM53_LEVEL_MAP)
+        if "5.2" in bare or "glm-52" in bare:
+            return dict(_GLM52_LEVEL_MAP)
+        return dict(_PASSTHROUGH_LEVEL_MAP)
+    if "mimo" in bare:
+        return dict(_PASSTHROUGH_LEVEL_MAP)
+    if "claude" in bare or "anthropic" in bare:
+        return dict(_BUDGET_LEVEL_MAP)
+    if "gemini" in bare:
+        return dict(_BUDGET_LEVEL_MAP)
+    if bare.startswith(("o1", "o3", "o4", "gpt")) or "openai" in bare:
+        return dict(_OPENAI_LEVEL_MAP)
+    return dict(_PASSTHROUGH_LEVEL_MAP)
+
+
+# 强度档的就近归位顺序（不含 off：off 是开关语义，由各 adapter 的 off
+# 分支处理，不参与强度档归位）
+_NATIVE_EFFORT_ORDER: List[str] = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+def resolve_native_effort(
+    level_map: Dict[str, Optional[str]],
+    level: str,
+    *,
+    default: Optional[str] = None,
+) -> Optional[str]:
+    """在厂商档位表中就近归位取值——单一事实源的读取入口。
+
+    与 ``registry.clamp_thinking_level`` 同哲学：**先向上（更高强度）找最近
+    原生档，再向下**。``level`` 是表中被屏蔽档（``None``）、未登记档或不
+   认识的 effort 字符串时走归位；连表都给不出落点时回落 ``default``
+    （调用方按厂商语义给，如 DeepSeek 用 ``"high"``）。
+    """
+    if isinstance(level, str) and level_map.get(level):
+        return level_map[level]
+    try:
+        idx = _NATIVE_EFFORT_ORDER.index(level)
+    except ValueError:
+        return default
+    for i in range(idx + 1, len(_NATIVE_EFFORT_ORDER)):
+        v = level_map.get(_NATIVE_EFFORT_ORDER[i])
+        if v:
+            return v
+    for i in range(idx - 1, -1, -1):
+        v = level_map.get(_NATIVE_EFFORT_ORDER[i])
+        if v:
+            return v
+    return default
+
+
+def infer_default_thinking_level(level_map: Dict[str, Optional[str]]) -> Optional[str]:
+    """从档位映射推导默认档：取 ≤high 的最高支持档，无则 None。
+
+    统一规则替代老 thinking_models.json 的人工 default：deepseek(low/high/max)
+    → high；qwen3.8(low/medium/xhigh) → medium；glm-5.3(low/high/max) → high；
+    全档透传 → high。off 不作默认（新会话默认不开思考，由前端再选）。
+    """
+    for level in ("high", "medium", "low", "minimal"):
+        if level_map.get(level):
+            return level
+    return None
 
 
 def merge_thinking_params(

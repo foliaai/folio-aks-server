@@ -163,6 +163,15 @@ def setup_logging(
         "aiokafka",
         "kafka",
         "kafka-python",
+        # LiteLLM：DEBUG 下会打印完整请求 kwargs 与响应原文（embedding 的
+        # 输入文本、chat 全量 messages 都在内），既刷屏又泄露数据内容；
+        # "LiteLLM" 是其 verbose_logger 的 logger 名（请求/响应值日志的主源），
+        # Router / Proxy 为派生 logger，"litellm" 覆盖模块命名空间。
+        # WARNING 及以上的真实异常仍会透出。
+        "litellm",
+        "LiteLLM",
+        "LiteLLM Router",
+        "LiteLLM Proxy",
     ]:
         logging.getLogger(name).setLevel(logging.WARNING)
     
