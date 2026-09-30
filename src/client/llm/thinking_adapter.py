@@ -127,6 +127,33 @@ class OpenAIThinkingAdapter(BaseThinkingAdapter):
         return {"reasoning_effort": effort or "high"}
 
 
+class MoonshotThinkingAdapter(BaseThinkingAdapter):
+    """Kimi K3（Moonshot）
+
+    官方规范（platform.kimi.com）：
+    - 顶层 ``reasoning_effort``："low" / "high" / "max"，默认 "max"
+    - K3 **始终进行推理**，没有关闭参数——off 归位到 low（与 OpenAI 推理系同策略）
+    - 从 K2.x 迁移须移除 ``thinking`` 配置（K3 不认）
+    """
+
+    def adapt(
+        self,
+        model: str,
+        level_or_effort: Any,
+        *,
+        max_tokens: Optional[int] = None,
+        spec: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        level = self._normalize_level(level_or_effort)
+        if level == "off":
+            return {"reasoning_effort": "low"}
+        effort = resolve_native_effort(
+            infer_thinking_level_map(model), level, default="max",
+        )
+        return {"reasoning_effort": effort or "max"}
+
+
 class DeepSeekThinkingAdapter(BaseThinkingAdapter):
     """DeepSeek 系列（DeepSeek-R1 / V3 / V4 / 官方及各平台部署）
 
@@ -521,6 +548,7 @@ def get_thinking_adapter(model: str) -> BaseThinkingAdapter:
     - 包含 'mimo' -> MiMoThinkingAdapter
     - 包含 'claude' 或 'anthropic' -> AnthropicThinkingAdapter
     - 包含 'gemini' -> GeminiThinkingAdapter
+    - 包含 'kimi' 或 'moonshot' -> MoonshotThinkingAdapter
     - 以 'o1' / 'o3' / 'o4' / 'gpt' 开头或包含 'openai' -> OpenAIThinkingAdapter
     - 其余 -> DefaultThinkingAdapter
     """
@@ -543,6 +571,8 @@ def get_thinking_adapter(model: str) -> BaseThinkingAdapter:
         return AnthropicThinkingAdapter()
     if "gemini" in bare_name:
         return GeminiThinkingAdapter()
+    if "kimi" in bare_name or "moonshot" in bare_name:
+        return MoonshotThinkingAdapter()
     if bare_name.startswith(("o1", "o3", "o4", "gpt")) or "openai" in bare_name:
         return OpenAIThinkingAdapter()
 
@@ -597,6 +627,13 @@ _OPENAI_LEVEL_MAP: Dict[str, Optional[str]] = {
     "medium": "medium", "high": "high", "xhigh": None, "max": None,
 }
 
+# Kimi K3（Moonshot）原生档：low / high / max（官方默认 max）。
+# K3 始终推理、无关闭参数——off/minimal 置 null，传入时归位到 low。
+_KIMI_LEVEL_MAP: Dict[str, Optional[str]] = {
+    "off": None, "minimal": None, "low": "low",
+    "medium": None, "high": "high", "xhigh": None, "max": "max",
+}
+
 # Anthropic / Gemini：budget 型，全档可用（具体预算由 adapter 按档位计算）
 _BUDGET_LEVEL_MAP: Dict[str, Optional[str]] = {
     "off": "none", "minimal": "minimal", "low": "low",
@@ -608,17 +645,22 @@ _BUDGET_LEVEL_MAP: Dict[str, Optional[str]] = {
 _PASSTHROUGH_LEVEL_MAP: Dict[str, Optional[str]] = dict(_BUDGET_LEVEL_MAP)
 
 
-def infer_thinking_level_map(model: str) -> Dict[str, Optional[str]]:
-    """按厂商规则推导「pi 档位 → 传给 ThinkingAdapter 的 effort 字符串」映射。
+def infer_thinking_level_map(model: str) -> Optional[Dict[str, Optional[str]]]:
+    """按本地厂商规则判定模型的「pi 档位 → effort 字符串」映射。
 
-    调用前提：网关 /v1/models 的 ``supported_parameters`` 已声明该模型支持
-    ``reasoning_effort``（仅支持 ``reasoning`` 开关的模型不进本函数，registry
-    直接用 ``_TOGGLE_LEVEL_MAP``）。返回值供合成 ``ThinkingModelSpec``：
-    - 字符串：registry 翻译层透传，adapter 收到后归一分派到对应分支
-    - ``None``：该档不支持，前端不展示（clamp 自动归位）
-    厂商规则不认识但网关声明支持 effort 的模型返回全档透传表。
+    **本地规则优先于网关声明**（调用前提：/v1/models 的 supported_parameters
+    已声明 reasoning；返回结果裁决该模型究竟走强度档位还是仅开关）：
 
-    **本函数与下方映射表是厂商档位规格的唯一事实源**：前端展示（registry
+    - 返回 dict：走强度档位。key=pi 档位，value=传给 ThinkingAdapter 的
+      effort 字符串（"none" 会被各家 adapter 归一为 off 分支）；``None``
+      值表示该档不支持（前端不展示，传入时由 clamp 归位）。
+      厂商规则不认识但网关声明支持 effort 的模型（如 kimi-k3）返回
+      全档透传表——本地无认知时才信网关。
+    - 返回 ``None``：**本地规则明确判定该模型不支持强度**（仅思考开关，
+      如 Qwen 3.7/3.5、GLM 5.1 及以下、MiMo）——即使网关声明了
+      reasoning_effort 也按开关式处理。
+
+    本函数与下方映射表是厂商档位规格的唯一事实源：前端展示（registry
     合成 spec）、请求参数构造（各 ThinkingAdapter.adapt 分派）都查这里的
     表，改档位规格只改表。
     """
@@ -634,19 +676,24 @@ def infer_thinking_level_map(model: str) -> Dict[str, Optional[str]]:
     if "qwen" in bare or "qwq" in bare:
         if "3.8" in bare or "qwen3.8" in bare or "qwen-3.8" in bare:
             return dict(_QWEN38_LEVEL_MAP)
-        return dict(_PASSTHROUGH_LEVEL_MAP)
+        # 3.7 / 3.5 / QwQ 等非 3.8 系：官方仅思考开关，无强度档
+        return None
     if "glm" in bare or "chatglm" in bare:
         if "5.3" in bare or "glm-53" in bare:
             return dict(_GLM53_LEVEL_MAP)
         if "5.2" in bare or "glm-52" in bare:
             return dict(_GLM52_LEVEL_MAP)
-        return dict(_PASSTHROUGH_LEVEL_MAP)
+        # 5.1 及以下：仅思考开关
+        return None
     if "mimo" in bare:
-        return dict(_PASSTHROUGH_LEVEL_MAP)
+        return None
     if "claude" in bare or "anthropic" in bare:
         return dict(_BUDGET_LEVEL_MAP)
     if "gemini" in bare:
         return dict(_BUDGET_LEVEL_MAP)
+    if "kimi" in bare or "moonshot" in bare:
+        # Kimi K3：始终推理（off=null 归位 low），原生档 low/high/max
+        return dict(_KIMI_LEVEL_MAP)
     if bare.startswith(("o1", "o3", "o4", "gpt")) or "openai" in bare:
         return dict(_OPENAI_LEVEL_MAP)
     return dict(_PASSTHROUGH_LEVEL_MAP)
@@ -670,6 +717,8 @@ def resolve_native_effort(
    认识的 effort 字符串时走归位；连表都给不出落点时回落 ``default``
     （调用方按厂商语义给，如 DeepSeek 用 ``"high"``）。
     """
+    if not level_map:
+        return default
     if isinstance(level, str) and level_map.get(level):
         return level_map[level]
     try:

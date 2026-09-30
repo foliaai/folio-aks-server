@@ -343,6 +343,27 @@ def test_gemini_adapter() -> None:
     assert res_high["extra_body"]["thinking_config"]["thinking_budget"] == 8192
 
 
+def test_moonshot_adapter() -> None:
+    from src.client.llm.thinking_adapter import MoonshotThinkingAdapter
+
+    adapter = get_thinking_adapter("moonshotai/kimi-k3")
+    assert isinstance(adapter, MoonshotThinkingAdapter)
+
+    # K3 始终推理：off 归位到 low（无关闭参数）
+    res_off = adapter.adapt("kimi-k3", "off")
+    assert res_off["reasoning_effort"] == "low"
+
+    # 原生三档直传
+    assert adapter.adapt("kimi-k3", "low")["reasoning_effort"] == "low"
+    assert adapter.adapt("kimi-k3", "high")["reasoning_effort"] == "high"
+    assert adapter.adapt("kimi-k3", "max")["reasoning_effort"] == "max"
+
+    # 非原生档就近归位：medium -> high（等距向上）、xhigh -> max、minimal -> low
+    assert adapter.adapt("kimi-k3", "medium")["reasoning_effort"] == "high"
+    assert adapter.adapt("kimi-k3", "xhigh")["reasoning_effort"] == "max"
+    assert adapter.adapt("kimi-k3", "minimal")["reasoning_effort"] == "low"
+
+
 def test_openai_adapter() -> None:
     adapter = get_thinking_adapter("openai/o3-mini")
     assert isinstance(adapter, OpenAIThinkingAdapter)
@@ -487,6 +508,7 @@ if __name__ == "__main__":
     test_switch_only_thinking_map()
     test_anthropic_adapter()
     test_gemini_adapter()
+    test_moonshot_adapter()
     test_openai_adapter()
     test_merge_thinking_params()
     test_litellm_profile_classifies_switch_and_effort()
