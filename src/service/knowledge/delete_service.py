@@ -109,6 +109,26 @@ class KnowledgeDeleteService:
 
     # ==================== 受理（同步） ====================
 
+    @staticmethod
+    def _require_file_write(session: Session, user_id: str, file_obj) -> None:
+        """删除/操作文件的判权（经其所属知识库；无 kb 归属的脏数据按属主校验）
+
+        Raises:
+            PermissionError: 无权操作
+        """
+        from src.db.mysql.repositories.business.knowledge_base_repo import (
+            knowledge_base_repo,
+        )
+        from src.service.knowledge.kb_access import resolve_kb_access
+
+        kb_id = file_obj.knowledge_base_id
+        if kb_id:
+            kb = knowledge_base_repo.get_by_id(session, kb_id)
+            if kb is None or not resolve_kb_access(session, user_id, kb).can_write:
+                raise PermissionError(f"无权操作该文件: file_id={file_obj.file_id}")
+        elif file_obj.user_id != user_id:
+            raise PermissionError(f"无权操作该文件: file_id={file_obj.file_id}")
+
     def mark_file_deleted(
         self,
         session: Session,
@@ -119,26 +139,33 @@ class KnowledgeDeleteService:
 
         **不会 commit**，由调用方统一提交事务。
 
+        共享库（team/public）内团队成员可删除其他成员上传的文件；
+        清理任务的 user_id 取文件行属主（联合主键定位 + CleanupWorker
+        物理删除依据），操作者只记入 updater / 日志。
+
         Args:
             session: MySQL 数据库会话
-            user_id: 用户ID
-            file_id: 文件ID
+            user_id: 操作者用户ID
+            file_id: 文件ID（uuid 全局唯一）
 
         Returns:
             CleanupTicket；文件不存在或已被标记时返回 None
+
+        Raises:
+            PermissionError: 操作者对文件所属知识库无写权限
         """
-        file_obj = workspace_file_system_repo.get_by_user_and_file(
-            session, user_id, file_id
-        )
+        file_obj = workspace_file_system_repo.get_by_file_id(session, file_id)
         if not file_obj:
-            logger.warning(f"文件不存在或已删除: user_id={user_id}, file_id={file_id}")
+            logger.warning(f"文件不存在或已删除: file_id={file_id}")
             return None
+
+        self._require_file_write(session, user_id, file_obj)
 
         file_obj.deleted = 1
         file_obj.updater = user_id
 
         return CleanupTicket(
-            user_id=user_id,
+            user_id=file_obj.user_id,
             file_id=file_id,
             document_id=file_obj.document_id,
             storage_path=file_obj.storage_path,

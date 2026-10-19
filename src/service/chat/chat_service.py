@@ -625,32 +625,42 @@ class ChatService:
         with manager.get_session() as db:
             folder = db.query(workspace_folder_repo.model).filter(
                 workspace_folder_repo.model.folder_id == folder_id,
-                workspace_folder_repo.model.user_id == user_id,
                 workspace_folder_repo.model.deleted == 0,
             ).first()
-            if not folder:
+            if not folder or (
+                folder.knowledge_base_id not in (
+                    knowledge_base_ids or [folder.knowledge_base_id]
+                )
+            ):
                 logger.warning(
                     f"_resolve_folder_document_ids: folder_id={folder_id} "
-                    f"不存在或无权限（user={user_id}）；返回空 scope（软降级）"
+                    f"不存在或不在会话范围内（user={user_id}）；返回空 scope（软降级）"
                 )
                 return {"document_ids": [], "folder_label": None}
 
             # 收集"目标文件夹 + 后代（如启用）"全部 folder_id
+            # （kb 维度：共享库内后代文件夹可能由其他成员创建）
             folder_ids: List[str] = [folder_id]
             if include_subfolders:
-                descendants = workspace_folder_repo.get_descendants(
-                    db, user_id, folder.full_path,
-                )
+                descendants = db.query(workspace_folder_repo.model).filter(
+                    workspace_folder_repo.model.knowledge_base_id
+                    == folder.knowledge_base_id,
+                    workspace_folder_repo.model.full_path.like(
+                        f"{folder.full_path}%"
+                    ),
+                    workspace_folder_repo.model.deleted == 0,
+                ).all()
                 folder_ids.extend(
                     f.folder_id for f in descendants
                     if f.folder_id != folder_id
                 )
 
             file_repo = WorkspaceFileSystemRepository()
-            kb_filter = knowledge_base_ids[0] if knowledge_base_ids else None
-            files = file_repo.get_by_folder_ids(
-                db, user_id, folder_ids, knowledge_base_id=kb_filter,
-            )
+            files = db.query(file_repo.model).filter(
+                file_repo.model.knowledge_base_id == folder.knowledge_base_id,
+                file_repo.model.folder_id.in_(folder_ids),
+                file_repo.model.deleted == 0,
+            ).all()
             # WorkspaceFileSystem.document_id 可空（文件可能尚未完成索引）
             doc_ids = [f.document_id for f in files if f.document_id]
             # 去重保序
@@ -710,7 +720,7 @@ class ChatService:
         manager = get_mysql_manager()
         with manager.get_session() as db:
             file_repo = WorkspaceFileSystemRepository()
-            file = file_repo.get_by_user_and_file(db, user_id, file_id)
+            file = file_repo.get_by_file_id(db, file_id)
             if not file:
                 logger.warning(
                     f"_resolve_file_document_ids: file_id={file_id} "

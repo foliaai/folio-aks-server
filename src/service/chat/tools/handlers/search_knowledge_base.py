@@ -148,12 +148,18 @@ async def handle(
         return "search_knowledge_base: 检索服务不可用。"
 
     from src.retrieve.pipeline.types import RetrieveRequest
-    from src.retrieve.types.query import MetadataFilter
+    from src.service.knowledge.kb_access import build_kb_scoped_filter
     from src.service.knowledge.tombstone import exclude_deleted
 
-    filters = MetadataFilter(user_id=kit.user_id, chunk_type=chunk_type)
-    if kit.knowledge_base_ids:
-        filters.knowledge_base_id = kit.knowledge_base_ids[0]
+    # 可见性分流：共享库（team/public）向量按 kb 隔离，不能带 user_id 过滤
+    # （否则只能检索到自己上传的部分）；会话绑定的库已不可访问时软降级
+    try:
+        kb_id = kit.knowledge_base_ids[0] if kit.knowledge_base_ids else None
+        filters = build_kb_scoped_filter(
+            kit.user_id, kb_id, chunk_type=chunk_type
+        )
+    except Exception:
+        return "search_knowledge_base: 当前会话绑定的知识库已不可访问。"
     if kit.scope_document_ids:
         filters.document_ids = list(kit.scope_document_ids)
     exclude_deleted(filters)

@@ -59,9 +59,27 @@ from src.db.storage.manager import StorageManager
 from src.db.storage.range_utils import is_range_satisfiable, parse_range_header
 from src.service.knowledge import tombstone
 from src.service.knowledge.delete_service import knowledge_delete_service
+from src.service.knowledge.kb_access import require_kb_access
 from src.service.knowledge.move_service import knowledge_move_service
 
 router = APIRouter(tags=["File"])
+
+
+def _require_file_access(
+    session: Session, user_id: str, file_id: str, level: str = "read"
+):
+    """取文件并经其所属知识库判权（file_id 为 uuid 全局唯一；共享库内
+    可见/可管理其他成员上传的文件）。无 kb 归属的脏数据按属主校验。"""
+    file_record = workspace_file_system_repo.get_by_file_id(session, file_id)
+    if not file_record:
+        raise HTTPException(status_code=404, detail="文件不存在或无权限")
+    if file_record.knowledge_base_id:
+        require_kb_access(
+            session, user_id, file_record.knowledge_base_id, level=level
+        )
+    elif file_record.user_id != user_id:
+        raise HTTPException(status_code=404, detail="文件不存在或无权限")
+    return file_record
 
 
 # ==================== 文件搜索（供前端 @ 文件选择器） ====================
@@ -83,9 +101,10 @@ async def search_files(
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FileListResponse]:
+    require_kb_access(session, user_id, knowledge_base_id, level="read")
     try:
-        records = workspace_file_system_repo.search_by_name(
-            session, user_id, knowledge_base_id, q, limit
+        records = workspace_file_system_repo.search_by_name_in_kb(
+            session, knowledge_base_id, q, limit
         )
     except SQLAlchemyError as e:
         logger.error(f"搜索文件失败: {e}")
@@ -135,6 +154,8 @@ async def move_file(
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="文件不存在或无权限")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="无权操作该文件")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except SQLAlchemyError as e:
@@ -264,11 +285,7 @@ async def get_file_preview(
     session: Session = Depends(get_db_session),
     storage: StorageManager = Depends(get_storage_manager),
 ) -> ApiResponse[FilePreviewResponse]:
-    file_record = workspace_file_system_repo.get_by_user_and_file(
-        session, user_id, file_id
-    )
-    if not file_record:
-        raise HTTPException(status_code=404, detail="文件不存在或无权限")
+    file_record = _require_file_access(session, user_id, file_id, "read")
 
     if not file_record.file_path:
         raise HTTPException(
@@ -334,11 +351,7 @@ async def get_file_raw(
     user_id: str = Depends(get_current_user_id_from_token),
     session: Session = Depends(get_db_session),
 ) -> Response:
-    file_record = workspace_file_system_repo.get_by_user_and_file(
-        session, user_id, file_id
-    )
-    if not file_record:
-        raise HTTPException(status_code=404, detail="文件不存在或无权限")
+    file_record = _require_file_access(session, user_id, file_id, "read")
 
     if not file_record.file_path:
         raise HTTPException(
@@ -457,12 +470,17 @@ async def delete_file(
             session.rollback()
             raise HTTPException(status_code=404, detail="文件不存在或已删除")
         session.commit()
+    except PermissionError:
+        session.rollback()
+        raise HTTPException(status_code=403, detail="无权操作该文件")
     except SQLAlchemyError as e:
         session.rollback()
         logger.error(f"删除文件失败: {e}")
         raise HTTPException(status_code=500, detail="删除失败")
 
-    tombstone.invalidate(user_id)
+    tombstone.invalidate(ticket.user_id)
+    if ticket.knowledge_base_id:
+        tombstone.invalidate_kb(ticket.knowledge_base_id)
     await knowledge_delete_service.publish_cleanup(producer, [ticket])
 
     return ApiResponse.success(
@@ -488,12 +506,18 @@ async def batch_delete_files(
             session, user_id, request.file_ids
         )
         session.commit()
+    except PermissionError:
+        session.rollback()
+        raise HTTPException(status_code=403, detail="无权操作其中的文件")
     except SQLAlchemyError as e:
         session.rollback()
         logger.error(f"批量删除失败: {e}")
         raise HTTPException(status_code=500, detail="批量删除失败")
 
-    tombstone.invalidate(user_id)
+    for t in tickets:
+        tombstone.invalidate(t.user_id)
+        if t.knowledge_base_id:
+            tombstone.invalidate_kb(t.knowledge_base_id)
     await knowledge_delete_service.publish_cleanup(producer, tickets)
 
     return ApiResponse.success(

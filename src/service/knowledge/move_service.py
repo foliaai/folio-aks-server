@@ -63,24 +63,17 @@ class KnowledgeMoveService:
     ) -> Optional[WorkspaceFolder]:
         """校验目标文件夹，返回文件夹对象
 
-        Args:
-            session: 数据库会话
-            user_id: 用户ID
-            target_folder_id: 目标文件夹ID（None 表示根目录，跳过校验）
-            expected_knowledge_base_id: 期望的知识库ID，用于校验跨知识库移动
-
-        Returns:
-            WorkspaceFolder 对象，target_folder_id 为 None 时返回 None
+        校验：文件夹存在（kb 维度）且与 expected_knowledge_base_id 同库。
+        可见性/写权限由文件的所属知识库 KBAccess 把关（见 _require_file_write）。
 
         Raises:
-            ValueError: 文件夹不存在、无权限或跨知识库
+            ValueError: 文件夹不存在或跨知识库
         """
         if target_folder_id is None:
             return None
 
         folder = session.query(WorkspaceFolder).filter(
             WorkspaceFolder.folder_id == target_folder_id,
-            WorkspaceFolder.user_id == user_id,
             WorkspaceFolder.deleted == 0,
         ).first()
 
@@ -99,6 +92,30 @@ class KnowledgeMoveService:
 
         return folder
 
+    @staticmethod
+    def _require_file_write(session: Session, user_id: str, file_obj) -> None:
+        """移动文件的判权（经其所属知识库；无 kb 归属的脏数据按属主校验）
+
+        Raises:
+            PermissionError: 无权操作
+        """
+        from src.db.mysql.repositories.business.knowledge_base_repo import (
+            knowledge_base_repo,
+        )
+        from src.service.knowledge.kb_access import resolve_kb_access
+
+        kb_id = file_obj.knowledge_base_id
+        if kb_id:
+            kb = knowledge_base_repo.get_by_id(session, kb_id)
+            if kb is None or not resolve_kb_access(session, user_id, kb).can_write:
+                raise PermissionError(
+                    f"无权操作该文件: file_id={file_obj.file_id}"
+                )
+        elif file_obj.user_id != user_id:
+            raise PermissionError(
+                f"无权操作该文件: file_id={file_obj.file_id}"
+            )
+
     def move_file(
         self,
         session: Session,
@@ -108,25 +125,22 @@ class KnowledgeMoveService:
     ) -> str:
         """移动单个文件到目标文件夹
 
-        Args:
-            session: 数据库会话
-            user_id: 用户ID
-            file_id: 文件ID
-            target_folder_id: 目标文件夹ID（None 表示移到知识库根目录）
-
-        Returns:
-            移动后的文件名
+        file_id 为 uuid 全局唯一；判权经其所属知识库（共享库团队成员
+        可移动其他成员上传的文件）。
 
         Raises:
-            FileNotFoundError: 文件不存在或无权限
+            FileNotFoundError: 文件不存在
+            PermissionError: 无权操作该文件
             ValueError: 目标文件夹无效、跨知识库、或文件已在目标文件夹
             SQLAlchemyError: 数据库操作失败
         """
-        file_record = workspace_file_system_repo.get_by_user_and_file(
-            session, user_id, file_id
+        file_record = workspace_file_system_repo.get_by_file_id(
+            session, file_id
         )
         if not file_record:
             raise FileNotFoundError(f"文件不存在或无权限: file_id={file_id}")
+
+        self._require_file_write(session, user_id, file_record)
 
         if file_record.folder_id == target_folder_id:
             raise ValueError("文件已在目标文件夹中")
@@ -141,8 +155,8 @@ class KnowledgeMoveService:
         session.commit()
 
         logger.info(
-            f"文件移动成功: user_id={user_id}, file_id={file_id}, "
-            f"target_folder_id={target_folder_id}"
+            f"文件移动成功: operator={user_id}, owner={file_record.user_id}, "
+            f"file_id={file_id}, target_folder_id={target_folder_id}"
         )
         return file_record.file_name
 
@@ -156,19 +170,11 @@ class KnowledgeMoveService:
         """批量移动文件到目标文件夹
 
         对每个文件独立校验，跳过不满足条件的文件并记录原因，
-        成功的文件在同一事务中提交。
-
-        Args:
-            session: 数据库会话
-            user_id: 用户ID
-            file_ids: 文件ID列表
-            target_folder_id: 目标文件夹ID（None 表示移到知识库根目录）
-
-        Returns:
-            MoveResult 包含成功数量和跳过的文件详情
+        成功的文件在同一事务中提交。无权操作的文件按"跳过"处理
+        （与批量语义一致，恶意混合批次不会静默获得部分成功之外的收益）。
 
         Raises:
-            ValueError: 目标文件夹不存在或无权限
+            ValueError: 目标文件夹不存在
             SQLAlchemyError: 数据库操作失败
         """
         result = MoveResult(total_requested=len(file_ids))
@@ -180,12 +186,20 @@ class KnowledgeMoveService:
 
         try:
             for file_id in file_ids:
-                file_record = workspace_file_system_repo.get_by_user_and_file(
-                    session, user_id, file_id
+                file_record = workspace_file_system_repo.get_by_file_id(
+                    session, file_id
                 )
                 if not file_record:
                     result.skipped_files.append(
                         SkippedFile(file_id=file_id, reason="文件不存在或无权限")
+                    )
+                    continue
+
+                try:
+                    self._require_file_write(session, user_id, file_record)
+                except PermissionError:
+                    result.skipped_files.append(
+                        SkippedFile(file_id=file_id, reason="无权操作该文件")
                     )
                     continue
 
@@ -218,7 +232,7 @@ class KnowledgeMoveService:
             raise
 
         logger.info(
-            f"批量移动文件完成: user_id={user_id}, "
+            f"批量移动文件完成: operator={user_id}, "
             f"moved={result.moved_count}/{result.total_requested}, "
             f"skipped={len(result.skipped_files)}, "
             f"target_folder_id={target_folder_id}"

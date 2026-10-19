@@ -15,5 +15,6 @@
 
 from api.routers.chat import chat_router
 from api.routers.knowledge import knowledge_router
+from api.routers.team import router as team_router
 
-__all__ = ["knowledge_router", "chat_router"]
+__all__ = ["knowledge_router", "chat_router", "team_router"]
