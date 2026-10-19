@@ -44,9 +44,11 @@ from api.schemas.team import (
     TeamListResponse,
     TeamMemberAddRequest,
     TeamMemberInfo,
+    TeamMemberRoleUpdateRequest,
     TeamUpdateRequest,
 )
 from src.db.mysql.models.business.team import Team
+from src.db.mysql.models.business.team_member import TeamMember
 from src.db.mysql.repositories.business.knowledge_base_repo import (
     knowledge_base_repo,
 )
@@ -73,6 +75,14 @@ def _require_team_role(
     if team is None or role is None:
         raise HTTPException(status_code=404, detail="团队不存在或无权限")
     return team, role
+
+
+def _require_team_manager(my_role: str) -> None:
+    """成员/团队信息管理操作：团队长或管理员可执行"""
+    if my_role not in ("owner", "admin"):
+        raise HTTPException(
+            status_code=403, detail="仅团队长或管理员可执行该操作"
+        )
 
 
 # ==================== 创建 ====================
@@ -220,8 +230,7 @@ async def update_team(
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[TeamInfo]:
     team, my_role = _require_team_role(session, team_id, user_id)
-    if my_role != "owner":
-        raise HTTPException(status_code=403, detail="仅团队 owner 可修改团队")
+    _require_team_manager(my_role)
 
     if request.name is not None:
         team.name = request.name
@@ -305,8 +314,7 @@ async def add_team_members(
     session: Session = Depends(get_db_session),
 ) -> ApiResponse:
     _, my_role = _require_team_role(session, team_id, user_id)
-    if my_role != "owner":
-        raise HTTPException(status_code=403, detail="仅团队 owner 可管理成员")
+    _require_team_manager(my_role)
 
     new_ids = [u.strip() for u in request.user_ids if u and u.strip()]
     if not new_ids:
@@ -355,8 +363,7 @@ async def remove_team_member(
     session: Session = Depends(get_db_session),
 ) -> ApiResponse:
     _, my_role = _require_team_role(session, team_id, user_id)
-    if my_role != "owner":
-        raise HTTPException(status_code=403, detail="仅团队 owner 可管理成员")
+    _require_team_manager(my_role)
 
     target_role = team_member_repo.get_member_role(
         session, team_id, member_user_id
@@ -366,6 +373,11 @@ async def remove_team_member(
     if target_role == "owner":
         raise HTTPException(
             status_code=400, detail="不能移除团队 owner（解散请用 DELETE /{team_id}）"
+        )
+    # 管理员只能移除普通成员；移除另一位管理员需团队长本人
+    if target_role == "admin" and my_role != "owner":
+        raise HTTPException(
+            status_code=403, detail="移除管理员需要团队长本人操作"
         )
 
     try:
@@ -381,3 +393,56 @@ async def remove_team_member(
         f"operator={user_id}"
     )
     return ApiResponse.success(message="成员已移除")
+
+
+@router.put(
+    "/{team_id}/members/{member_user_id}/role",
+    response_model=ApiResponse,
+    summary="调整成员角色（仅团队长）",
+    description=(
+        "将普通成员设为管理员，或将管理员降为普通成员。"
+        "管理员可管理成员与团队信息；团队长角色不可变更。"
+    ),
+)
+async def update_team_member_role(
+    team_id: str,
+    member_user_id: str,
+    request: TeamMemberRoleUpdateRequest,
+    user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_db_session),
+) -> ApiResponse:
+    _, my_role = _require_team_role(session, team_id, user_id)
+    if my_role != "owner":
+        raise HTTPException(
+            status_code=403, detail="仅团队长可调整成员角色"
+        )
+
+    if request.role not in ("admin", "member"):
+        raise HTTPException(
+            status_code=400, detail="角色仅支持 admin / member"
+        )
+
+    target_role = team_member_repo.get_member_role(
+        session, team_id, member_user_id
+    )
+    if target_role is None:
+        raise HTTPException(status_code=404, detail="该用户不是团队成员")
+    if target_role == "owner":
+        raise HTTPException(status_code=400, detail="不能调整团队长的角色")
+
+    try:
+        session.query(TeamMember).filter(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == member_user_id,
+        ).update({"role": request.role}, synchronize_session="fetch")
+        session.commit()
+    except SQLAlchemyError as e:
+        session.rollback()
+        logger.error(f"调整团队成员角色失败: {e}")
+        raise HTTPException(status_code=500, detail="调整角色失败")
+
+    logger.info(
+        f"调整团队成员角色: team_id={team_id}, member={member_user_id}, "
+        f"role={request.role}, operator={user_id}"
+    )
+    return ApiResponse.success(message="成员角色已更新")

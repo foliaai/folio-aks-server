@@ -11,11 +11,11 @@
     设计文档：docs/特殊功能设计/团队知识库与公共知识库设计.md §5.1
     判权矩阵（唯一事实源，所有端点过它，不允许各自写条件）：
 
-    | visibility | can_read    | can_write    | can_manage                    |
-    |----------- |-------------|--------------|-------------------------------|
-    | private    | owner       | owner        | owner                         |
-    | team       | team member | team member  | team owner / KB创建者 / admin |
-    | public     | 任何登录用户 | KB创建者/admin | 同 can_write                 |
+    | visibility | can_read    | can_write    | can_manage                       |
+    |----------- |-------------|--------------|----------------------------------|
+    | private    | owner       | owner        | owner                            |
+    | team       | team member | team member  | team owner/admin / KB创建者 / 平台 admin |
+    | public     | 任何登录用户 | KB创建者/admin | 同 can_write                     |
 
     错误口径：KB 不存在 → 404；无权限 → 私库 404（不泄露存在性）、
     共享库（team/public）403（其存在性本就通过列表可见）。
@@ -105,7 +105,7 @@ def resolve_kb_access(
         role = team_member_repo.get_member_role(session, kb.team_id, user_id)
         if role is not None:
             manage = (
-                role == "owner"
+                role in ("owner", "admin")
                 or kb.user_id == user_id  # KB 创建者
                 or is_admin
             )

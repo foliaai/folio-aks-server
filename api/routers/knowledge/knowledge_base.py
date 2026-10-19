@@ -96,7 +96,8 @@ def _to_kb_info(kb: KnowledgeBase, team_names: Optional[dict] = None) -> Knowled
     summary="创建知识库",
     description=(
         "创建一个新的知识库。同一用户下知识库名称不能重复。"
-        "visibility=team 时须传 team_id 且创建者为该团队成员；"
+        "visibility=team 不需要传 team_id：自动创建 1:1 成员组（创建者为负责人），"
+        "成员经库行「成员管理」邀请；显式传 team_id 仅保留给外部脚本绑定既有成员组。"
         "visibility=public 的创建权受 PUBLIC_KB_ADMIN_ONLY 开关控制。"
     ),
 )
@@ -114,17 +115,28 @@ async def create_knowledge_base(
 
     team_id: Optional[str] = None
     if visibility == "team":
-        if not request.team_id:
-            raise HTTPException(
-                status_code=400, detail="团队知识库必须指定 team_id"
+        if request.team_id:
+            # 显式绑定既有成员组（外部脚本用；UI 不走这条路）
+            role = team_member_repo.get_member_role(
+                session, request.team_id, user_id
             )
-        # 创建者须为该团队成员（团队不存在与无权限同口径 404，不泄露存在性）
-        role = team_member_repo.get_member_role(
-            session, request.team_id, user_id
-        )
-        if role is None:
-            raise HTTPException(status_code=404, detail="团队不存在或无权限")
-        team_id = request.team_id
+            if role is None:
+                raise HTTPException(status_code=404, detail="团队不存在或无权限")
+            team_id = request.team_id
+        else:
+            # 1:1 隐式成员组：随库创建、删库自动回收（D12），UI 全程不感知
+            team_id = f"team-{uuid.uuid4()}"
+            session.add(
+                Team(
+                    team_id=team_id,
+                    name=request.knowledge_base_name,
+                    description=None,
+                    creator=user_id,
+                )
+            )
+            team_member_repo.add_members(
+                session, team_id, [user_id], role="owner"
+            )
     elif visibility == "public":
         if not can_create_public_kb(user_id):
             raise HTTPException(
@@ -370,6 +382,20 @@ async def delete_knowledge_base(
         session.rollback()
         logger.error(f"删除知识库失败: {e}")
         raise HTTPException(status_code=500, detail="删除失败")
+
+    # 1:1 隐式成员组回收：绑定组不再挂任何库时自动解散（成员关系一并清理），
+    # 显式绑定的共享组同样适用——没有库引用即无存在意义
+    if kb.team_id and kb.visibility == "team":
+        if knowledge_base_repo.count_active_by_team(session, kb.team_id) == 0:
+            team_member_repo.remove_all_by_team(session, kb.team_id)
+            team_row = session.query(Team).filter(
+                Team.team_id == kb.team_id
+            ).first()
+            if team_row is not None:
+                team_row.deleted = 1
+                team_row.updater = user_id
+            session.commit()
+            logger.info(f"回收成员组: team_id={kb.team_id}, operator={user_id}")
 
     logger.info(
         f"删除知识库: operator={user_id}, kb_id={knowledge_base_id}, "

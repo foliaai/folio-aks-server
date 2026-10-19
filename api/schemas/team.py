@@ -51,7 +51,10 @@ class TeamCreateRequest(BaseModel):
 class TeamMemberInfo(BaseModel):
     """团队成员信息"""
     user_id: str = Field(..., description="成员用户ID")
-    role: str = Field(..., description="角色：owner=创建者 / member=成员")
+    role: str = Field(
+        ...,
+        description="角色：owner=团队长 / admin=管理员（可管理成员与团队信息）/ member=成员",
+    )
     joined_time: Optional[str] = Field(
         default=None, description="加入时间（ISO 格式）"
     )
@@ -103,4 +106,11 @@ class TeamMemberAddRequest(BaseModel):
     """批量添加成员请求"""
     user_ids: List[str] = Field(
         ..., min_length=1, description="成员 user_id 列表"
+    )
+
+
+class TeamMemberRoleUpdateRequest(BaseModel):
+    """调整成员角色请求（仅团队长可操作）"""
+    role: str = Field(
+        ..., description="目标角色：admin=设为管理员 / member=降为普通成员"
     )
