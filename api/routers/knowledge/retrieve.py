@@ -20,8 +20,10 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
+from sqlalchemy.orm import Session
 
 from api.dependencies.auth import get_current_user_id
+from api.dependencies.database import get_db_session
 from api.schemas.common import ApiResponse
 from api.schemas.knowledge.retrieve import (
     ChunkItemSchema,
@@ -32,12 +34,18 @@ from api.schemas.knowledge.retrieve import (
     RouteInfoSchema,
     SingleRetrieveRequestSchema,
 )
+from src.db.mysql.models.business.workspace_file_system import WorkspaceFileSystem
 from src.retrieve.pipeline.types import (
     RetrieveRequest,
     RetrieveResponse,
     RouteConfig,
 )
 from src.retrieve.types.query import MetadataFilter
+from src.service.knowledge.kb_access import (
+    build_kb_scoped_filter,
+    has_read_any_kb,
+    require_kb_access,
+)
 from src.service.knowledge.retrieve_service import RetrieveService
 from src.service.knowledge.tombstone import exclude_deleted
 
@@ -96,11 +104,13 @@ async def smart_retrieve(
 
         request = RetrieveRequest(
             query_text=body.query_text,
-            filters=exclude_deleted(MetadataFilter(
-                user_id=user_id,
-                knowledge_base_id=body.knowledge_base_id,
-                document_id=body.document_id,
-            )),
+            filters=exclude_deleted(
+                build_kb_scoped_filter(
+                    user_id,
+                    body.knowledge_base_id,
+                    document_id=body.document_id,
+                )
+            ),
             top_k=body.top_k,
             enable_rerank=body.enable_rerank,
             enable_route_planner=body.enable_route_planner,
@@ -118,6 +128,8 @@ async def smart_retrieve(
 
         return ApiResponse.success(data=schema)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"智能检索失败: {e}")
         raise HTTPException(status_code=500, detail=f"检索失败: {e}") from e
@@ -147,11 +159,13 @@ async def custom_retrieve(
         response = await service.retrieve_custom(
             routes=routes,
             query_text=body.query_text,
-            filters=exclude_deleted(MetadataFilter(
-                user_id=user_id,
-                knowledge_base_id=body.knowledge_base_id,
-                document_id=body.document_id,
-            )),
+            filters=exclude_deleted(
+                build_kb_scoped_filter(
+                    user_id,
+                    body.knowledge_base_id,
+                    document_id=body.document_id,
+                )
+            ),
             top_k=body.top_k,
             enable_rerank=body.enable_rerank,
         )
@@ -159,6 +173,8 @@ async def custom_retrieve(
         schema = _response_to_schema(response)
         return ApiResponse.success(data=schema)
 
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"无效路由: {e}") from e
     except Exception as e:
@@ -173,9 +189,43 @@ async def custom_retrieve(
 async def single_retrieve(
     body: SingleRetrieveRequestSchema,
     user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_db_session),
 ) -> ApiResponse:
-    """直接调用指定的原子检索能力"""
+    """直接调用指定的原子检索能力（目标范围必须对当前用户可读）"""
     try:
+        # ===== 越权修复（H1）：目标 kb/document 必须可读，且必须提供其一 =====
+        if body.knowledge_base_id:
+            require_kb_access(
+                session, user_id, body.knowledge_base_id, level="read"
+            )
+        elif body.document_id:
+            # SHA256 去重使同一 document 可出现在多个库：任一所在库可读即放行
+            # （同文档内容相同，跨库命中不产生额外泄露面）
+            doc_kb_ids = [
+                row[0]
+                for row in session.query(
+                    WorkspaceFileSystem.knowledge_base_id
+                )
+                .filter(
+                    WorkspaceFileSystem.document_id == body.document_id,
+                    WorkspaceFileSystem.deleted == 0,
+                )
+                .distinct()
+                .all()
+            ]
+            if not doc_kb_ids:
+                raise HTTPException(status_code=404, detail="文档不存在")
+            if not has_read_any_kb(session, user_id, doc_kb_ids):
+                raise HTTPException(
+                    status_code=403, detail="无权读取该文档所在的知识库"
+                )
+        else:
+            # 无界直调等价于跨用户全库检索，直接拒绝
+            raise HTTPException(
+                status_code=400,
+                detail="必须提供 knowledge_base_id 或 document_id 以限定检索范围",
+            )
+
         service = _get_service()
         result = await service.retrieve_single(
             capability_name=body.capability_name,
@@ -192,6 +242,8 @@ async def single_retrieve(
             "total_count": result.total_count,
         })
 
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"无效能力: {e}") from e
     except Exception as e:
