@@ -13,11 +13,15 @@
 =================================================="""
 
 from src.db.mysql.models.business.knowledge_base import KnowledgeBase
+from src.db.mysql.models.business.team import Team
+from src.db.mysql.models.business.team_member import TeamMember
 from src.db.mysql.models.business.workspace_file_system import WorkspaceFileSystem
 from src.db.mysql.models.business.workspace_folder import WorkspaceFolder
 
 __all__ = [
     "KnowledgeBase",
+    "Team",
+    "TeamMember",
     "WorkspaceFileSystem",
     "WorkspaceFolder",
 ]

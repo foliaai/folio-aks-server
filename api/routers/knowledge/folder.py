@@ -5,19 +5,25 @@
 @File    : folder.py
 @Author  : caixiongjiang
 @Date    : 2026/02/18
-@Function: 
+@Function:
     文件夹管理路由
     提供文件夹相关的 API 端点：
       POST   /create            - 创建文件夹
-      GET    /list              - 获取用户在某知识库下的文件夹列表
+      GET    /list              - 获取知识库下的文件夹列表（平铺）
       GET    /children          - 获取指定文件夹的直接子文件夹
+      GET    /root-files        - 获取知识库根目录文件
       GET    /{folder_id}       - 获取单个文件夹详情
       GET    /{folder_id}/files - 获取文件夹内的文件列表
       PUT    /{folder_id}/rename - 重命名文件夹
       PUT    /{folder_id}/move   - 移动文件夹
-      DELETE /{folder_id}       - 删除文件夹（软删除，含后代）
+      DELETE /{folder_id}       - 删除文件夹（含后代）
+
+    共享库改造（设计文档 §5.2.3）：入口经 KBAccess 判权后一律按 kb 维度
+    查询与管理——团队成员可见并管理其他成员创建的文件夹；private 库
+    判权后 kb 维度与 user 维度等价，行为不变。
 @Modify History:
     2026/03/17 - 文件软删除迁移到 file.py 模块
+    2026/10/18 - KBAccess 判权 + kb 维度查询（团队/公共库支持）
 
 @Copyright：Copyright(c) 2024-2026. All Rights Reserved
 =================================================="""
@@ -45,10 +51,6 @@ from api.schemas.knowledge.folder import (
     FolderRenameRequest,
 )
 from src.db.mysql.models.business.workspace_file_system import WorkspaceFileSystem
-from src.db.mysql.models.business.workspace_folder import WorkspaceFolder
-from src.db.mysql.repositories.business.knowledge_base_repo import (
-    knowledge_base_repo,
-)
 from src.db.mysql.repositories.business.workspace_file_system_repo import (
     workspace_file_system_repo,
 )
@@ -61,6 +63,7 @@ from src.service.knowledge.delete_service import (
     CleanupTicket,
     knowledge_delete_service,
 )
+from src.service.knowledge.kb_access import require_kb_access
 
 router = APIRouter(tags=["Folder"])
 
@@ -79,7 +82,7 @@ def _to_file_info(file: WorkspaceFileSystem) -> FileInfo:
     )
 
 
-def _to_folder_info(folder: WorkspaceFolder) -> FolderInfo:
+def _to_folder_info(folder) -> FolderInfo:
     """将 ORM 模型转为 Pydantic 响应模型"""
     return FolderInfo(
         folder_id=folder.folder_id,
@@ -93,6 +96,17 @@ def _to_folder_info(folder: WorkspaceFolder) -> FolderInfo:
     )
 
 
+def _require_folder_access(
+    session: Session, user_id: str, folder_id: str, level: str = "read"
+):
+    """取文件夹并经其所属知识库判权；不存在/无权 404（不泄露存在性）"""
+    folder = workspace_folder_repo.get_by_folder_id(session, folder_id)
+    if not folder or not folder.knowledge_base_id:
+        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
+    require_kb_access(session, user_id, folder.knowledge_base_id, level=level)
+    return folder
+
+
 # ==================== 创建 ====================
 
 
@@ -100,37 +114,38 @@ def _to_folder_info(folder: WorkspaceFolder) -> FolderInfo:
     "/create",
     response_model=ApiResponse[FolderCreateResponse],
     summary="创建文件夹",
-    description="在指定知识库下创建文件夹。可通过 parent_folder_id 指定父文件夹以实现嵌套。",
+    description="在指定知识库下创建文件夹。可通过 parent_folder_id 指定父文件夹以实现嵌套（父文件夹须属于同一知识库）。",
 )
 async def create_folder(
     request: FolderCreateRequest,
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FolderCreateResponse]:
-    kb = knowledge_base_repo.get_by_id_and_user(
-        session, request.knowledge_base_id, user_id
+    kb = require_kb_access(
+        session, user_id, request.knowledge_base_id, level="write"
     )
-    if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在或无权限")
 
     parent_path = "/"
     depth = 0
 
     if request.parent_folder_id:
-        parent_folder = session.query(WorkspaceFolder).filter(
-            WorkspaceFolder.folder_id == request.parent_folder_id,
-            WorkspaceFolder.user_id == user_id,
-            WorkspaceFolder.deleted == 0,
-        ).first()
-        if not parent_folder:
+        parent_folder = workspace_folder_repo.get_by_folder_id(
+            session, request.parent_folder_id
+        )
+        if (
+            not parent_folder
+            or parent_folder.knowledge_base_id != request.knowledge_base_id
+        ):
             raise HTTPException(status_code=404, detail="父文件夹不存在或无权限")
         parent_path = parent_folder.full_path
         depth = parent_folder.depth + 1
 
     full_path = f"{parent_path}{request.folder_name}/"
 
-    existing = workspace_folder_repo.get_by_full_path(session, user_id, full_path)
-    if existing and existing.knowledge_base_id == request.knowledge_base_id:
+    existing = workspace_folder_repo.get_by_full_path_in_kb(
+        session, request.knowledge_base_id, full_path
+    )
+    if existing:
         raise HTTPException(status_code=409, detail=f"同路径文件夹已存在: {full_path}")
 
     folder_id = f"folder-{uuid.uuid4()}"
@@ -176,11 +191,10 @@ async def create_folder(
 @router.get(
     "/list",
     response_model=ApiResponse[FolderListResponse],
-    summary="获取完整文件夹树（平铺）",
+    summary="获取知识库完整文件夹树（平铺，kb 维度）",
     description=(
-        "一次性返回用户在指定知识库下的所有层级文件夹（平铺列表，按 depth + sort_order 排序）。"
-        "适用于：侧边栏文件夹导航树渲染、移动文件夹时的目标选择器、面包屑路径构建等需要完整目录结构的场景。"
-        "如果只需要浏览某一层的子文件夹，请使用 GET /children 接口。"
+        "一次性返回指定知识库下的所有层级文件夹（平铺列表，按 depth + sort_order 排序）。"
+        "共享库返回全部成员创建的文件夹。"
     ),
 )
 async def list_folders(
@@ -188,9 +202,8 @@ async def list_folders(
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FolderListResponse]:
-    folders = workspace_folder_repo.get_by_user_and_knowledge_base(
-        session, user_id, knowledge_base_id
-    )
+    require_kb_access(session, user_id, knowledge_base_id, level="read")
+    folders = workspace_folder_repo.get_by_kb(session, knowledge_base_id)
     items = [_to_folder_info(f) for f in folders]
     return ApiResponse.success(
         data=FolderListResponse(folders=items, total=len(items))
@@ -203,8 +216,7 @@ async def list_folders(
     summary="获取当前目录的子文件夹",
     description=(
         "获取指定父文件夹下的直接子文件夹（仅一层，不递归）。"
-        "适用于：逐层浏览文件夹、打开某个文件夹时加载其内容。"
-        "parent_folder_id 不传则返回根目录下的文件夹。"
+        "parent_folder_id 不传则返回根目录下的文件夹（当前用户自建，兼容旧行为）。"
     ),
 )
 async def list_children(
@@ -214,9 +226,14 @@ async def list_children(
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FolderListResponse]:
-    children = workspace_folder_repo.get_children(
-        session, user_id, parent_folder_id
-    )
+    if parent_folder_id is None:
+        # 兼容旧行为：根目录文件夹按用户返回（顶级知识库导航走 /base/list）
+        children = workspace_folder_repo.get_children(session, user_id, None)
+    else:
+        folder = _require_folder_access(session, user_id, parent_folder_id, "read")
+        children = workspace_folder_repo.get_children_in_kb(
+            session, folder.knowledge_base_id, parent_folder_id
+        )
     items = [_to_folder_info(f) for f in children]
     return ApiResponse.success(
         data=FolderListResponse(folders=items, total=len(items))
@@ -226,10 +243,10 @@ async def list_children(
 @router.get(
     "/root-files",
     response_model=ApiResponse[FileListResponse],
-    summary="获取知识库根目录文件",
+    summary="获取知识库根目录文件（kb 维度）",
     description=(
         "获取指定知识库根目录下的文件（即 folder_id 为空的文件）。"
-        "这些文件不属于任何文件夹，直接挂在知识库根目录下。"
+        "共享库返回全部成员上传的文件。"
     ),
 )
 async def list_root_files(
@@ -237,8 +254,9 @@ async def list_root_files(
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FileListResponse]:
-    files = workspace_file_system_repo.get_by_folder_id(
-        session, user_id, folder_id=None, knowledge_base_id=knowledge_base_id
+    require_kb_access(session, user_id, knowledge_base_id, level="read")
+    files = workspace_file_system_repo.get_by_folder_id_in_kb(
+        session, knowledge_base_id, None
     )
     items = [_to_file_info(f) for f in files]
     return ApiResponse.success(
@@ -257,38 +275,24 @@ async def get_folder(
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FolderInfo]:
-    folder = session.query(WorkspaceFolder).filter(
-        WorkspaceFolder.folder_id == folder_id,
-        WorkspaceFolder.user_id == user_id,
-        WorkspaceFolder.deleted == 0,
-    ).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
-
+    folder = _require_folder_access(session, user_id, folder_id, "read")
     return ApiResponse.success(data=_to_folder_info(folder))
 
 
 @router.get(
     "/{folder_id}/files",
     response_model=ApiResponse[FileListResponse],
-    summary="获取文件夹内的文件列表",
-    description="获取指定文件夹下的所有文件（不含子文件夹中的文件）。",
+    summary="获取文件夹内的文件列表（kb 维度）",
+    description="获取指定文件夹下的所有文件（不含子文件夹中的文件）。共享库含全部成员的文件。",
 )
 async def list_folder_files(
     folder_id: str,
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FileListResponse]:
-    folder = session.query(WorkspaceFolder).filter(
-        WorkspaceFolder.folder_id == folder_id,
-        WorkspaceFolder.user_id == user_id,
-        WorkspaceFolder.deleted == 0,
-    ).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
-
-    files = workspace_file_system_repo.get_by_folder_id(
-        session, user_id, folder_id
+    folder = _require_folder_access(session, user_id, folder_id, "read")
+    files = workspace_file_system_repo.get_by_folder_id_in_kb(
+        session, folder.knowledge_base_id, folder_id
     )
     items = [_to_file_info(f) for f in files]
     return ApiResponse.success(
@@ -303,7 +307,7 @@ async def list_folder_files(
     "/{folder_id}/rename",
     response_model=ApiResponse[FolderInfo],
     summary="重命名文件夹",
-    description="重命名文件夹，会级联更新所有后代文件夹的 full_path。默认文件夹不允许重命名。",
+    description="重命名文件夹，会级联更新所有后代文件夹的 full_path（kb 维度）。默认文件夹不允许重命名。",
 )
 async def rename_folder(
     folder_id: str,
@@ -311,19 +315,13 @@ async def rename_folder(
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FolderInfo]:
-    folder = session.query(WorkspaceFolder).filter(
-        WorkspaceFolder.folder_id == folder_id,
-        WorkspaceFolder.user_id == user_id,
-        WorkspaceFolder.deleted == 0,
-    ).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
+    folder = _require_folder_access(session, user_id, folder_id, "write")
     if folder.is_default == 1:
         raise HTTPException(status_code=400, detail="默认文件夹不允许重命名")
 
     try:
-        updated = workspace_folder_repo.rename(
-            session, user_id, folder_id, request.folder_name, updater=user_id
+        updated = workspace_folder_repo.rename_in_kb(
+            session, folder_id, request.folder_name, updater=user_id
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -341,8 +339,8 @@ async def rename_folder(
     response_model=ApiResponse[FolderInfo],
     summary="移动文件夹",
     description=(
-        "将文件夹移动到新的父文件夹下，级联更新所有后代的 full_path 和 depth。"
-        "默认文件夹不允许移动。不能移动到自身的子目录下。"
+        "将文件夹移动到新的父文件夹下，级联更新所有后代的 full_path 和 depth（kb 维度）。"
+        "默认文件夹不允许移动；不能移动到自身的子目录下；不能跨知识库。"
     ),
 )
 async def move_folder(
@@ -351,20 +349,13 @@ async def move_folder(
     user_id: str = Depends(get_current_user_id),
     session: Session = Depends(get_db_session),
 ) -> ApiResponse[FolderInfo]:
-    folder = session.query(WorkspaceFolder).filter(
-        WorkspaceFolder.folder_id == folder_id,
-        WorkspaceFolder.user_id == user_id,
-        WorkspaceFolder.deleted == 0,
-    ).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
+    folder = _require_folder_access(session, user_id, folder_id, "write")
     if folder.is_default == 1:
         raise HTTPException(status_code=400, detail="默认文件夹不允许移动")
 
     try:
-        updated = workspace_folder_repo.move(
+        updated = workspace_folder_repo.move_in_kb(
             session,
-            user_id,
             folder_id,
             request.target_parent_folder_id,
             updater=user_id,
@@ -400,32 +391,28 @@ async def delete_folder(
     session: Session = Depends(get_db_session),
     producer: KafkaProducer = Depends(get_kafka_producer),
 ) -> ApiResponse[FolderDeleteResponse]:
-    folder = session.query(WorkspaceFolder).filter(
-        WorkspaceFolder.folder_id == folder_id,
-        WorkspaceFolder.user_id == user_id,
-        WorkspaceFolder.deleted == 0,
-    ).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="文件夹不存在或无权限")
+    folder = _require_folder_access(session, user_id, folder_id, "write")
     if folder.is_default == 1:
         raise HTTPException(status_code=400, detail="默认文件夹不允许删除")
 
     full_path = folder.full_path
+    kb_id = folder.knowledge_base_id
 
     try:
         # 先标记文件：文件夹行删掉之后就查不到树内还有哪些文件了
-        deleted_folder_ids = workspace_folder_repo.get_subtree_ids(
-            session, user_id=user_id, folder_id=folder_id, full_path_prefix=full_path
+        deleted_folder_ids = workspace_folder_repo.get_subtree_ids_in_kb(
+            session, folder_id=folder_id, full_path_prefix=full_path
         )
-        marked_files = workspace_file_system_repo.cascade_mark_deleted_by_folder_ids(
+        marked_files = workspace_file_system_repo.cascade_mark_deleted_by_folder_ids_in_kb(
             session,
-            user_id=user_id,
             folder_ids=deleted_folder_ids,
             updater=user_id,
         )
+        # 清理任务的 user_id 必须是文件行的属主（联合主键定位 + worker 物理删除依据），
+        # 共享库中操作者可能不是上传者
         cleanup_tickets = [
             CleanupTicket(
-                user_id=user_id,
+                user_id=f.user_id,
                 file_id=f.file_id,
                 document_id=f.document_id,
                 storage_path=f.storage_path,
@@ -441,22 +428,24 @@ async def delete_folder(
         logger.error(f"删除文件夹失败: {e}")
         raise HTTPException(status_code=500, detail="删除失败")
 
-    tombstone.invalidate(user_id)
+    # 墓碑缓存失效：文件属主 + 知识库双口径（共享库删除对全员生效）
+    for ticket in cleanup_tickets:
+        tombstone.invalidate(ticket.user_id)
+    if kb_id:
+        tombstone.invalidate_kb(kb_id)
     await knowledge_delete_service.publish_cleanup(producer, cleanup_tickets)
 
     logger.info(
-        f"删除文件夹: user_id={user_id}, folder_id={folder_id}, "
-        f"path={full_path}, folders={len(deleted_folder_ids)}, "
-        f"files={len(cleanup_tickets)}"
+        f"删除文件夹: operator={user_id}, folder_id={folder_id}, "
+        f"folders={len(deleted_folder_ids)}, files={len(cleanup_tickets)}, "
+        f"kb_id={kb_id}"
     )
+
     return ApiResponse.success(
         data=FolderDeleteResponse(
             folder_id=folder_id,
             deleted_folder_count=len(deleted_folder_ids),
             deleted_file_count=len(cleanup_tickets),
         ),
-        message=(
-            f"已删除 {len(deleted_folder_ids)} 个文件夹，"
-            f"{len(cleanup_tickets)} 个文件"
-        ),
+        message=f"已删除 {len(deleted_folder_ids)} 个文件夹、{len(cleanup_tickets)} 个文件",
     )

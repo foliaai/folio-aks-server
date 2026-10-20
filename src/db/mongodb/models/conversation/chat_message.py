@@ -114,7 +114,11 @@ class ToolCallRecord(PydanticBaseModel):
 
     id: str = Field(..., description="LLM 给出的调用 ID（与 role=tool 的 tool_call_id 关联）")
     name: str = Field(..., description="工具名")
-    arguments: Dict[str, Any] = Field(default_factory=dict, description="参数（已解析）")
+    arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="参数（已解析，按模型原样落库——模型写 alias（c1/s1/d1）就存 alias，"
+        "与流式帧/下一轮上下文装配/历史回放同一口径；真实 id 由 metadata deltas 重建 alias map 反查）",
+    )
     result_brief: Optional[str] = Field(
         None, description="工具执行结果的文本摘要（前几百字）",
     )
@@ -150,6 +154,8 @@ class TokenUsageRecord(PydanticBaseModel):
     completion_tokens: int = 0
     thinking_tokens: Optional[int] = None
     total_tokens: int = 0
+    # 前缀缓存命中数（命中率 = cached/prompt；session 级按 token 加权平均）
+    cached_tokens: int = 0
 
     model_config = ConfigDict(extra="ignore")
 

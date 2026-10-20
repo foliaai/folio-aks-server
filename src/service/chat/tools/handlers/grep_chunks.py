@@ -104,11 +104,14 @@ def _build_filters(
     document_id: Optional[str],
     chunk_type: Optional[str],
 ) -> MetadataFilter:
+    from src.service.knowledge.kb_access import build_kb_scoped_filter
     from src.service.knowledge.tombstone import exclude_deleted
 
-    filters = MetadataFilter(user_id=kit.user_id, chunk_type=chunk_type)
-    if kit.knowledge_base_ids:
-        filters.knowledge_base_id = kit.knowledge_base_ids[0]
+    # 可见性分流：共享库（team/public）向量按 kb 隔离，不能带 user_id 过滤
+    kb_id = kit.knowledge_base_ids[0] if kit.knowledge_base_ids else None
+    filters = build_kb_scoped_filter(
+        kit.user_id, kb_id, chunk_type=chunk_type
+    )
     if document_id:
         filters.document_id = document_id.strip()
     elif kit.scope_document_ids:
@@ -216,11 +219,14 @@ async def handle(
 
     top_k = max(1, min(int(top_k), _MAX_TOP_K))
     context_chars = max(20, min(int(context_chars), 300))
-    filters = _build_filters(
-        kit,
-        document_id=document_id,
-        chunk_type=chunk_type,
-    )
+    try:
+        filters = _build_filters(
+            kit,
+            document_id=document_id,
+            chunk_type=chunk_type,
+        )
+    except Exception:
+        return "grep_chunks: 当前会话绑定的知识库已不可访问。"
 
     try:
         items = await _run_lexical_search(

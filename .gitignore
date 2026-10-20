@@ -138,6 +138,7 @@ celerybeat.pid
 .env
 .env.production
 .env.jp
+.env.dev
 .envrc
 .venv
 env/

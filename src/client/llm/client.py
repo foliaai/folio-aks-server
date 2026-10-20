@@ -700,6 +700,11 @@ def _yield_stream_chunks(chunk: Any) -> Iterator[StreamChunk]:
     if usage_raw:
         completion_details = usage_raw.get("completion_tokens_details") or {}
         thinking_tokens = completion_details.get("reasoning_tokens")
+        prompt_details = usage_raw.get("prompt_tokens_details") or {}
+        cached = prompt_details.get("cached_tokens")
+        if cached is None:
+            # DeepSeek 原生字段兜底（经 litellm 透传时可能保留原生形态）
+            cached = usage_raw.get("prompt_cache_hit_tokens")
         usage_obj = TokenUsage(
             prompt_tokens=int(usage_raw.get("prompt_tokens") or 0),
             completion_tokens=int(usage_raw.get("completion_tokens") or 0),
@@ -707,6 +712,7 @@ def _yield_stream_chunks(chunk: Any) -> Iterator[StreamChunk]:
                 int(thinking_tokens) if thinking_tokens is not None else None
             ),
             total_tokens=int(usage_raw.get("total_tokens") or 0),
+            cached_tokens=int(cached or 0),
         )
         yield StreamChunk(
             delta="", is_thought=False, finish_reason=None, model=model,

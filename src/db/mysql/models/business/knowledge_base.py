@@ -33,6 +33,8 @@ class KnowledgeBase(BaseModel):
     __table_args__ = (
         Index("idx_user_id", "user_id"),
         Index("idx_user_parent", "user_id", "parent_knowledge_base_id"),
+        Index("idx_visibility", "visibility"),
+        Index("idx_team", "team_id"),
     )
 
     knowledge_base_id = Column(
@@ -70,6 +72,19 @@ class KnowledgeBase(BaseModel):
         Text,
         nullable=True,
         comment="知识库描述",
+    )
+
+    visibility = Column(
+        String(16),
+        default="private",
+        nullable=False,
+        comment="可见性：private=个人（默认）/ team=团队 / public=公共",
+    )
+
+    team_id = Column(
+        String(64),
+        nullable=True,
+        comment="visibility=team 时绑定的团队ID（→ team.team_id），其余为 NULL",
     )
 
     # BaseModel 字段会自动继承：
