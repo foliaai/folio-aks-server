@@ -46,6 +46,9 @@ class TokenUsage(BaseModel):
     completion_tokens: int = Field(0, ge=0)
     thinking_tokens: Optional[int] = Field(None, ge=0)
     total_tokens: int = Field(0, ge=0)
+    # 前缀缓存命中数：model_lake/litellm 均透传 prompt_tokens_details.cached_tokens；
+    # 兜底 DeepSeek 原生 prompt_cache_hit_tokens。命中率 = cached/prompt
+    cached_tokens: int = Field(0, ge=0)
 
     model_config = ConfigDict(extra="ignore")
 
