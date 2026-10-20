@@ -141,6 +141,8 @@ class TokenUsageItem(BaseModel):
     completion_tokens: int = 0
     thinking_tokens: Optional[int] = None
     total_tokens: int = 0
+    # 前缀缓存命中数（命中率 = cached/prompt）
+    cached_tokens: int = 0
 
     model_config = ConfigDict(extra="ignore")
 

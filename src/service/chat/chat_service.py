@@ -625,32 +625,42 @@ class ChatService:
         with manager.get_session() as db:
             folder = db.query(workspace_folder_repo.model).filter(
                 workspace_folder_repo.model.folder_id == folder_id,
-                workspace_folder_repo.model.user_id == user_id,
                 workspace_folder_repo.model.deleted == 0,
             ).first()
-            if not folder:
+            if not folder or (
+                folder.knowledge_base_id not in (
+                    knowledge_base_ids or [folder.knowledge_base_id]
+                )
+            ):
                 logger.warning(
                     f"_resolve_folder_document_ids: folder_id={folder_id} "
-                    f"不存在或无权限（user={user_id}）；返回空 scope（软降级）"
+                    f"不存在或不在会话范围内（user={user_id}）；返回空 scope（软降级）"
                 )
                 return {"document_ids": [], "folder_label": None}
 
             # 收集"目标文件夹 + 后代（如启用）"全部 folder_id
+            # （kb 维度：共享库内后代文件夹可能由其他成员创建）
             folder_ids: List[str] = [folder_id]
             if include_subfolders:
-                descendants = workspace_folder_repo.get_descendants(
-                    db, user_id, folder.full_path,
-                )
+                descendants = db.query(workspace_folder_repo.model).filter(
+                    workspace_folder_repo.model.knowledge_base_id
+                    == folder.knowledge_base_id,
+                    workspace_folder_repo.model.full_path.like(
+                        f"{folder.full_path}%"
+                    ),
+                    workspace_folder_repo.model.deleted == 0,
+                ).all()
                 folder_ids.extend(
                     f.folder_id for f in descendants
                     if f.folder_id != folder_id
                 )
 
             file_repo = WorkspaceFileSystemRepository()
-            kb_filter = knowledge_base_ids[0] if knowledge_base_ids else None
-            files = file_repo.get_by_folder_ids(
-                db, user_id, folder_ids, knowledge_base_id=kb_filter,
-            )
+            files = db.query(file_repo.model).filter(
+                file_repo.model.knowledge_base_id == folder.knowledge_base_id,
+                file_repo.model.folder_id.in_(folder_ids),
+                file_repo.model.deleted == 0,
+            ).all()
             # WorkspaceFileSystem.document_id 可空（文件可能尚未完成索引）
             doc_ids = [f.document_id for f in files if f.document_id]
             # 去重保序
@@ -710,7 +720,7 @@ class ChatService:
         manager = get_mysql_manager()
         with manager.get_session() as db:
             file_repo = WorkspaceFileSystemRepository()
-            file = file_repo.get_by_user_and_file(db, user_id, file_id)
+            file = file_repo.get_by_file_id(db, file_id)
             if not file:
                 logger.warning(
                     f"_resolve_file_document_ids: file_id={file_id} "
@@ -1613,6 +1623,7 @@ class ChatService:
                             "prompt_tokens": resp.usage.prompt_tokens,
                             "completion_tokens": resp.usage.completion_tokens,
                             "total_tokens": resp.usage.total_tokens,
+                            "cached_tokens": getattr(resp.usage, "cached_tokens", 0) or 0,
                         },
                     },
                 )
@@ -1770,6 +1781,7 @@ class ChatService:
                         "prompt_tokens": resp.usage.prompt_tokens,
                         "completion_tokens": resp.usage.completion_tokens,
                         "total_tokens": resp.usage.total_tokens,
+                        "cached_tokens": getattr(resp.usage, "cached_tokens", 0) or 0,
                     },
                 },
             )
@@ -1927,9 +1939,9 @@ class ChatService:
                 None 表示 LLM 这轮没返工具调用。
             alias_map: 若提供，会把"本轮新分配的 alias delta"写入
                 ``metadata['alias_additions']``，便于下一 turn 重建累加。
-                同时把 tool_calls 入参里的 ``chunk_id`` / ``chunk_ids`` alias
-                还原成真实 id 落库（Mongo 里保存语义稳定的真实 id，前端历史
-                回放就不必依赖 alias）。
+                tool_calls 入参按模型原样（alias 口径 c1/s1/d1）落库——与流式
+                帧、下一轮上下文装配、历史回放保持同一口径；真实 id 需要时
+                由 metadata deltas 重建（rebuild_alias_map_from_history）。
             thinking_ms: 本轮思考墙钟耗时（毫秒）；无思考则为 None。
         """
         try:
@@ -1955,44 +1967,11 @@ class ChatService:
                 brief, items_added, tc_time_ms, execution_model = results_by_id.get(
                     tc.id, (None, 0, None, None),
                 )
-                # 落库前把入参里的 alias 还原回真实 id（chunk_id / chunk_ids /
-                # section_id / document_id / parent_section_id）
+                # 入参按模型原样落库（模型写的是 alias 就存 alias）：
+                # 下一轮上下文装配与本轮回放看到同一口径，别名的省 token /
+                # 防泄漏目标不在多轮间被 unwrap 破坏；真实 id 由 metadata
+                # deltas 重建 alias map 反查
                 args = dict(tc.arguments or {})
-                if alias_map is not None:
-                    # chunk_id
-                    raw = args.get("chunk_id")
-                    if isinstance(raw, str) and alias_map.is_alias(raw):
-                        real = alias_map.resolve_alias(raw)
-                        if real:
-                            args["chunk_id"] = real
-                    # chunk_ids
-                    raw_list = args.get("chunk_ids")
-                    if isinstance(raw_list, list):
-                        unwrapped: List[Any] = []
-                        for value in raw_list:
-                            if (
-                                isinstance(value, str)
-                                and value
-                                and alias_map.is_alias(value)
-                            ):
-                                real = alias_map.resolve_alias(value)
-                                unwrapped.append(real if real else value)
-                            else:
-                                unwrapped.append(value)
-                        args["chunk_ids"] = unwrapped
-                    # section_id / parent_section_id
-                    for key in ("section_id", "parent_section_id"):
-                        raw = args.get(key)
-                        if isinstance(raw, str) and alias_map.is_section_alias(raw):
-                            real = alias_map.resolve_section_alias(raw)
-                            if real:
-                                args[key] = real
-                    # document_id
-                    raw = args.get("document_id")
-                    if isinstance(raw, str) and alias_map.is_document_alias(raw):
-                        real = alias_map.resolve_document_alias(raw)
-                        if real:
-                            args["document_id"] = real
                 extra_kwargs: Dict[str, Any] = {}
                 if kit and tc.name == "search_knowledge_base":
                     sr = kit.search_results.get(tc.id)
@@ -2022,6 +2001,7 @@ class ChatService:
                 thinking_tokens=(
                     getattr(resp.usage, "thinking_tokens", None)
                 ),
+                cached_tokens=getattr(resp.usage, "cached_tokens", 0) or 0,
             )
             metadata: Dict[str, Any] = {"model": resp.model or ""}
             if alias_map is not None:

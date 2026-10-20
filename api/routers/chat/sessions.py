@@ -161,6 +161,7 @@ def _to_message_item(m: ChatMessage) -> ChatMessageItem:
                 completion_tokens=int(m.usage.completion_tokens or 0),
                 thinking_tokens=m.usage.thinking_tokens,
                 total_tokens=int(m.usage.total_tokens or 0),
+                cached_tokens=int(getattr(m.usage, "cached_tokens", 0) or 0),
             )
             if m.usage is not None
             else None

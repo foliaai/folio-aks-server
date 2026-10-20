@@ -27,8 +27,20 @@ from src.db.mysql.repositories.base.element_meta_info_repo import element_meta_i
 from src.db.storage.factory import StorageFactory
 from src.db.storage.manager import StorageManager
 from src.db.storage.range_utils import is_range_satisfiable, parse_range_header
+from src.service.knowledge.kb_access import require_kb_access
 
 router = APIRouter(tags=["Chunk"])
+
+
+def _require_chunk_kb_read(session: Session, meta, user_id: str) -> None:
+    """chunk 归属校验（H2 修复）：chunk → 所属知识库 → can_read。
+
+    无法定位所属知识库的 chunk 一律拒绝（404），避免无主数据成为旁路。
+    """
+    kb_id = getattr(meta, "knowledge_base_id", None)
+    if not kb_id:
+        raise HTTPException(status_code=404, detail="Chunk 不存在或已删除")
+    require_kb_access(session, user_id, kb_id, level="read")
 
 # MinerU pipeline content_list bbox：左上角原点，[x0,y0,x1,y1]，各轴映射到 0~1000
 MINERU_COORD_SPACE = "mineru-normalized-1000"
@@ -62,6 +74,9 @@ async def get_chunk_image_preview(
     meta = chunk_meta_info_repo.get_by_id(session, chunk_id)
     if not meta or getattr(meta, "deleted", 0) != 0:
         raise HTTPException(status_code=404, detail="Chunk 不存在或已删除")
+
+    # 2. 归属校验：所属知识库必须可读
+    _require_chunk_kb_read(session, meta, _user_id)
 
     if meta.chunk_type != "image":
         raise HTTPException(
@@ -142,6 +157,9 @@ async def get_chunk_raw_image(
     meta = chunk_meta_info_repo.get_by_id(session, chunk_id)
     if not meta or getattr(meta, "deleted", 0) != 0:
         raise HTTPException(status_code=404, detail="Chunk 不存在或已删除")
+
+    # 2. 归属校验：所属知识库必须可读
+    _require_chunk_kb_read(session, meta, user_id)
 
     if meta.chunk_type != "image":
         raise HTTPException(
@@ -245,7 +263,10 @@ async def get_chunk_position(
     if not meta or getattr(meta, "deleted", 0) != 0:
         raise HTTPException(status_code=404, detail="Chunk 不存在或已删除")
 
-    # 2. 查询关联的 Element 位置信息
+    # 2. 归属校验：所属知识库必须可读
+    _require_chunk_kb_read(session, meta, _user_id)
+
+    # 3. 查询关联的 Element 位置信息
     #    文本 chunk 的 chunk 级 page_index 取自 buffer 首个元素，可能与本 chunk
     #    实际元素所在页不一致（文本跨页时）。因此这里逐元素带上各自的 page_index，
     #    并用「首个有效元素的页码」作为定位跳转的目标页，使文本与图片/表格一致。

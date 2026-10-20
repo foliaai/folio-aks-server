@@ -452,6 +452,118 @@ class WorkspaceFileSystemRepository(BaseRepository[WorkspaceFileSystem]):
         ).delete(synchronize_session='fetch')
         return count > 0
 
+    # ==================== kb 维度（共享库支持） ====================
+    #
+    # 共享库（team/public）内文件由多成员上传，user_id 只是"上传者"，
+    # 查询与管理一律按 knowledge_base_id 聚合（入口已过 KBAccess 判权）。
+
+    def get_by_file_id(
+        self,
+        session: Session,
+        file_id: str,
+    ) -> Optional[WorkspaceFileSystem]:
+        """按 file_id 单查（file_id 为 uuid 全局唯一；判权由调用方经其所属 kb 完成）"""
+        try:
+            return session.query(self.model).filter(
+                self.model.file_id == file_id,
+                self.model.deleted == 0,
+            ).first()
+        except SQLAlchemyError as e:
+            logger.error(f"根据file_id查询失败: {e}")
+            return None
+
+    def get_by_folder_id_in_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+        folder_id: Optional[str],
+    ) -> List[WorkspaceFileSystem]:
+        """知识库内某文件夹下的文件（folder_id=None 表示根目录）"""
+        try:
+            query = session.query(self.model).filter(
+                self.model.knowledge_base_id == knowledge_base_id,
+                self.model.deleted == 0,
+            )
+            if folder_id is None:
+                query = query.filter(self.model.folder_id.is_(None))
+            else:
+                query = query.filter(self.model.folder_id == folder_id)
+            return query.all()
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度查询文件夹文件失败: {e}")
+            return []
+
+    def search_by_name_in_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+        q: str,
+        limit: int = 20,
+    ) -> List[WorkspaceFileSystem]:
+        """按文件名模糊搜索知识库内文件（kb 维度，供 @ 文件选择器）"""
+        try:
+            capped = max(1, min(limit, 50))
+            query = session.query(self.model).filter(
+                self.model.knowledge_base_id == knowledge_base_id,
+                self.model.deleted == 0,
+            )
+            keyword = (q or "").strip()
+            if keyword:
+                escaped = (
+                    keyword.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                query = query.filter(
+                    self.model.file_name.like(f"%{escaped}%", escape="\\")
+                )
+            return query.order_by(self.model.file_name).limit(capped).all()
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度按文件名搜索失败: {e}")
+            return []
+
+    def cascade_mark_deleted_by_folder_ids_in_kb(
+        self,
+        session: Session,
+        folder_ids: List[str],
+        updater: str = "",
+    ) -> List[WorkspaceFileSystem]:
+        """按文件夹ID列表级联标记删除文件（不限上传者）。
+
+        **不会 commit**，由调用方统一提交事务。
+        """
+        if not folder_ids:
+            return []
+        files = session.query(self.model).filter(
+            self.model.folder_id.in_(folder_ids),
+            self.model.deleted == 0,
+        ).all()
+        for f in files:
+            f.deleted = 1
+            f.updater = updater
+        logger.debug(
+            f"级联标记删除{len(files)}个文件(kb维度): "
+            f"folder_ids count={len(folder_ids)}"
+        )
+        return files
+
+    def get_tombstoned_document_ids_by_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+    ) -> List[str]:
+        """知识库维度获取待清理 document_id（共享库：任一成员删除即对全员生效）"""
+        try:
+            rows = session.query(self.model.document_id).filter(
+                self.model.knowledge_base_id == knowledge_base_id,
+                self.model.deleted != 0,
+                self.model.document_id.isnot(None),
+            ).all()
+            return list({row[0] for row in rows if row[0]})
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度查询待清理 document_id 失败: {e}")
+            return []
+
 
 # 全局实例
 workspace_file_system_repo = WorkspaceFileSystemRepository()

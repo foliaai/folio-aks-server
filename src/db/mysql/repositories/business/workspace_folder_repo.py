@@ -494,5 +494,242 @@ class WorkspaceFolderRepository(BaseRepository[WorkspaceFolder]):
             return None
 
 
+    # ==================== kb 维度（共享库支持） ====================
+    #
+    # 共享库（team/public）内文件夹由多成员创建，user_id 只是"创建者"，
+    # 查询与管理一律按 knowledge_base_id 聚合（入口已过 KBAccess 判权）。
+    # folder_id 为 uuid 全局唯一，单查不再叠加 user 条件。
+
+    def get_by_folder_id(
+        self,
+        session: Session,
+        folder_id: str,
+    ) -> Optional[WorkspaceFolder]:
+        """按 folder_id 单查（判权由调用方经其所属 kb 完成）"""
+        try:
+            return session.query(self.model).filter(
+                self.model.folder_id == folder_id,
+                self.model.deleted == 0,
+            ).first()
+        except SQLAlchemyError as e:
+            logger.error(f"根据folder_id单查失败: {e}")
+            return None
+
+    def get_by_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+    ) -> List[WorkspaceFolder]:
+        """知识库下全部存活文件夹（平铺，按 depth + sort_order）"""
+        try:
+            return (
+                session.query(self.model)
+                .filter(
+                    self.model.knowledge_base_id == knowledge_base_id,
+                    self.model.deleted == 0,
+                )
+                .order_by(self.model.depth, self.model.sort_order)
+                .all()
+            )
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度查询文件夹失败: {e}")
+            return []
+
+    def get_children_in_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+        parent_folder_id: Optional[str],
+    ) -> List[WorkspaceFolder]:
+        """kb 内某父文件夹的直接子文件夹（parent None = 根）"""
+        try:
+            query = session.query(self.model).filter(
+                self.model.knowledge_base_id == knowledge_base_id,
+                self.model.deleted == 0,
+            )
+            if parent_folder_id is None:
+                query = query.filter(self.model.parent_folder_id.is_(None))
+            else:
+                query = query.filter(
+                    self.model.parent_folder_id == parent_folder_id
+                )
+            return query.order_by(self.model.sort_order).all()
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度查询子文件夹失败: {e}")
+            return []
+
+    def get_by_full_path_in_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+        full_path: str,
+    ) -> Optional[WorkspaceFolder]:
+        """按 kb + full_path 查文件夹（创建去重检查用）"""
+        try:
+            return session.query(self.model).filter(
+                self.model.knowledge_base_id == knowledge_base_id,
+                self.model.full_path == full_path,
+                self.model.deleted == 0,
+            ).first()
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度根据full_path查询失败: {e}")
+            return None
+
+    def get_subtree_ids_in_kb(
+        self,
+        session: Session,
+        folder_id: str,
+        full_path_prefix: str,
+    ) -> List[str]:
+        """文件夹自身及所有后代 ID（kb 维度，不限创建者）"""
+        descendant_rows = session.query(self.model.folder_id).filter(
+            self.model.full_path.like(f"{full_path_prefix}%"),
+            self.model.folder_id != folder_id,
+            self.model.deleted == 0,
+        ).all()
+        return [folder_id] + [row[0] for row in descendant_rows]
+
+    def rename_in_kb(
+        self,
+        session: Session,
+        folder_id: str,
+        new_name: str,
+        updater: str = "",
+    ) -> Optional[WorkspaceFolder]:
+        """重命名文件夹并级联更新后代 full_path（kb 维度）"""
+        try:
+            folder = session.query(self.model).filter(
+                self.model.folder_id == folder_id,
+                self.model.deleted == 0,
+            ).first()
+            if not folder:
+                return None
+
+            old_path: str = folder.full_path
+            kb_id = folder.knowledge_base_id
+            parent_path = old_path.rsplit(folder.folder_name + "/", 1)[0]
+            new_path = f"{parent_path}{new_name}/"
+
+            dup = session.query(self.model).filter(
+                self.model.knowledge_base_id == kb_id,
+                self.model.full_path == new_path,
+                self.model.deleted == 0,
+                self.model.folder_id != folder_id,
+            ).first()
+            if dup:
+                raise ValueError(f"同级已存在同名文件夹: {new_path}")
+
+            folder.folder_name = new_name
+            folder.full_path = new_path
+            folder.updater = updater
+
+            descendants = session.query(self.model).filter(
+                self.model.knowledge_base_id == kb_id,
+                self.model.full_path.like(f"{old_path}%"),
+                self.model.folder_id != folder_id,
+                self.model.deleted == 0,
+            ).all()
+            for d in descendants:
+                d.full_path = new_path + d.full_path[len(old_path):]
+                d.updater = updater
+
+            session.commit()
+            session.refresh(folder)
+            logger.info(
+                f"重命名文件夹(kb维度): folder_id={folder_id}, "
+                f"{old_path} -> {new_path}, 级联更新{len(descendants)}个后代"
+            )
+            return folder
+
+        except ValueError:
+            session.rollback()
+            raise
+        except SQLAlchemyError as e:
+            session.rollback()
+            logger.error(f"重命名文件夹失败(kb维度): {e}")
+            return None
+
+    def move_in_kb(
+        self,
+        session: Session,
+        folder_id: str,
+        target_parent_folder_id: Optional[str],
+        updater: str = "",
+    ) -> Optional[WorkspaceFolder]:
+        """移动文件夹并级联更新后代 full_path/depth（kb 维度）"""
+        try:
+            folder = session.query(self.model).filter(
+                self.model.folder_id == folder_id,
+                self.model.deleted == 0,
+            ).first()
+            if not folder:
+                return None
+
+            old_path: str = folder.full_path
+            old_depth: int = folder.depth
+            kb_id = folder.knowledge_base_id
+
+            new_parent_path = "/"
+            new_depth = 0
+
+            if target_parent_folder_id is not None:
+                parent = session.query(self.model).filter(
+                    self.model.folder_id == target_parent_folder_id,
+                    self.model.deleted == 0,
+                ).first()
+                if not parent:
+                    raise ValueError("目标父文件夹不存在或无权限")
+                if parent.knowledge_base_id != kb_id:
+                    raise ValueError("不允许跨知识库移动文件夹")
+                if parent.full_path.startswith(old_path):
+                    raise ValueError("不能将文件夹移动到自身的子目录下")
+                new_parent_path = parent.full_path
+                new_depth = parent.depth + 1
+
+            new_path = f"{new_parent_path}{folder.folder_name}/"
+
+            dup = session.query(self.model).filter(
+                self.model.knowledge_base_id == kb_id,
+                self.model.full_path == new_path,
+                self.model.deleted == 0,
+                self.model.folder_id != folder_id,
+            ).first()
+            if dup:
+                raise ValueError(f"目标位置已存在同名文件夹: {new_path}")
+
+            depth_delta = new_depth - old_depth
+            folder.parent_folder_id = target_parent_folder_id
+            folder.full_path = new_path
+            folder.depth = new_depth
+            folder.updater = updater
+
+            descendants = session.query(self.model).filter(
+                self.model.knowledge_base_id == kb_id,
+                self.model.full_path.like(f"{old_path}%"),
+                self.model.folder_id != folder_id,
+                self.model.deleted == 0,
+            ).all()
+            for d in descendants:
+                d.full_path = new_path + d.full_path[len(old_path):]
+                d.depth = d.depth + depth_delta
+                d.updater = updater
+
+            session.commit()
+            session.refresh(folder)
+            logger.info(
+                f"移动文件夹(kb维度): folder_id={folder_id}, "
+                f"{old_path} -> {new_path}, 级联更新{len(descendants)}个后代"
+            )
+            return folder
+
+        except ValueError:
+            session.rollback()
+            raise
+        except SQLAlchemyError as e:
+            session.rollback()
+            logger.error(f"移动文件夹失败(kb维度): {e}")
+            return None
+
+
 # 全局实例
 workspace_folder_repo = WorkspaceFolderRepository()

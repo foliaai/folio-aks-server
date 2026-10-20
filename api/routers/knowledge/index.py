@@ -68,6 +68,7 @@ from src.db.mysql.repositories.business.workspace_folder_repo import (
     workspace_folder_repo,
 )
 from src.db.storage.manager import StorageManager
+from src.service.knowledge.kb_access import require_kb_access
 from src.types.messages.index import IndexStartMessage
 from src.utils.config_manager import get_config_manager
 from src.utils.pdf_linearize import maybe_linearize
@@ -191,23 +192,29 @@ def _resolve_folder(
     knowledge_base_id: str,
 ) -> tuple[Optional[str], str]:
     """
-    解析 folder_id 和 folder_path。
+    解析 folder_id 和 folder_path（kb 维度：共享库内可引用其他成员创建的文件夹）。
 
     传入 folder_id 时查询对应文件夹；为空时文件放在顶层（根目录）。
 
     Returns:
         (folder_id, full_path) 元组，folder_id 为 None 表示顶层
+
+    Raises:
+        HTTPException: 404 文件夹不存在；400 跨知识库引用
     """
     if folder_id:
         from src.db.mysql.models.business.workspace_folder import WorkspaceFolder
         folder = session.query(WorkspaceFolder).filter(
             WorkspaceFolder.folder_id == folder_id,
-            WorkspaceFolder.user_id == user_id,
             WorkspaceFolder.deleted == 0,
         ).first()
-        if folder:
-            return folder.folder_id, folder.full_path
-        return folder_id, "/"
+        if not folder:
+            raise HTTPException(status_code=404, detail="目标文件夹不存在")
+        if folder.knowledge_base_id != knowledge_base_id:
+            raise HTTPException(
+                status_code=400, detail="目标文件夹不属于该知识库"
+            )
+        return folder.folder_id, folder.full_path
 
     return None, "/"
 
@@ -249,9 +256,7 @@ async def upload_file(
 ) -> ApiResponse[FileUploadResponse]:
     """上传单个文件到对象存储并创建 MySQL 元数据记录"""
 
-    kb = knowledge_base_repo.get_by_id_and_user(session, knowledge_base_id, user_id)
-    if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在或无权限")
+    kb = require_kb_access(session, user_id, knowledge_base_id, level="write")
 
     filename = file.filename or "unknown"
     ext = _validate_file_extension(filename)
@@ -368,9 +373,7 @@ async def upload_files_batch(
     if not files:
         raise HTTPException(status_code=400, detail="文件列表不能为空")
 
-    kb = knowledge_base_repo.get_by_id_and_user(session, knowledge_base_id, user_id)
-    if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在或无权限")
+    kb = require_kb_access(session, user_id, knowledge_base_id, level="write")
 
     resolved_folder_id, folder_path = _resolve_folder(
         session, folder_id, user_id, knowledge_base_id,
@@ -500,16 +503,14 @@ async def build_index(
 ) -> ApiResponse[IndexBuildResponse]:
     """触发索引构建，向 Kafka 发送 IndexStartMessage"""
 
-    kb = knowledge_base_repo.get_by_id_and_user(
-        session, request.knowledge_base_id, user_id
+    kb = require_kb_access(
+        session, user_id, request.knowledge_base_id, level="write"
     )
-    if not kb:
-        raise HTTPException(status_code=404, detail="知识库不存在或无权限")
 
     parent_kb_name: Optional[str] = None
     if kb.parent_knowledge_base_id:
-        parent_kb = knowledge_base_repo.get_by_id_and_user(
-            session, kb.parent_knowledge_base_id, user_id
+        parent_kb = knowledge_base_repo.get_by_id(
+            session, kb.parent_knowledge_base_id
         )
         if parent_kb:
             parent_kb_name = parent_kb.knowledge_base_name
@@ -519,12 +520,14 @@ async def build_index(
     failed = 0
 
     for file_id in request.file_ids:
-        # 查询文件记录
+        # 查询文件记录（kb 维度：共享库内团队成员可触发其他成员上传文件的索引）
         file_record: Optional[WorkspaceFileSystem] = (
-            workspace_file_system_repo.get_by_user_and_file(session, user_id, file_id)
+            workspace_file_system_repo.get_by_file_id(session, file_id)
         )
 
-        if not file_record:
+        if not file_record or (
+            file_record.knowledge_base_id != request.knowledge_base_id
+        ):
             results.append(
                 IndexBuildFileResult(
                     file_id=file_id,
@@ -664,6 +667,11 @@ async def get_file_progress(
 ) -> ApiResponse[FileProgressResponse]:
     """查询单个文件的索引进度，优先 Redis → fallback MySQL"""
 
+    # 归属校验先行：Redis 进度按 file_id 全局存储，不校验会泄露他人进度
+    from api.routers.knowledge.file import _require_file_access
+
+    file_record = _require_file_access(session, user_id, file_id, "read")
+
     redis_progress = await progress_mgr.get_progress(file_id)
     if redis_progress:
         return ApiResponse.success(
@@ -676,12 +684,6 @@ async def get_file_progress(
                 message=redis_progress.message,
             )
         )
-
-    file_record = workspace_file_system_repo.get_by_user_and_file(
-        session, user_id, file_id
-    )
-    if not file_record:
-        raise HTTPException(status_code=404, detail="文件不存在或无权限")
 
     return ApiResponse.success(data=_fallback_progress_from_mysql(file_record))
 
@@ -703,6 +705,16 @@ async def get_batch_progress(
     if not file_ids:
         raise HTTPException(status_code=400, detail="file_ids 不能为空")
 
+    # 归属校验先行（与单个进度一致），无权访问的文件统一按 not_found 口径返回
+    from api.routers.knowledge.file import _require_file_access
+
+    accessible: dict[str, WorkspaceFileSystem] = {}
+    for fid in file_ids:
+        try:
+            accessible[fid] = _require_file_access(session, user_id, fid, "read")
+        except HTTPException:
+            accessible[fid] = None
+
     redis_results = await progress_mgr.get_batch_progress(file_ids)
 
     file_progresses: list[FileProgressResponse] = []
@@ -711,7 +723,7 @@ async def get_batch_progress(
     failed_count = 0
 
     for fid, redis_prog in zip(file_ids, redis_results):
-        if redis_prog:
+        if redis_prog and accessible.get(fid) is not None:
             resp = FileProgressResponse(
                 file_id=redis_prog.file_id,
                 file_name=redis_prog.file_name,
@@ -721,9 +733,7 @@ async def get_batch_progress(
                 message=redis_prog.message,
             )
         else:
-            file_record = workspace_file_system_repo.get_by_user_and_file(
-                session, user_id, fid
-            )
+            file_record = accessible.get(fid)
             if not file_record:
                 resp = FileProgressResponse(
                     file_id=fid,

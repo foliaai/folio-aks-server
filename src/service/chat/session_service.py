@@ -130,6 +130,13 @@ class ChatSessionService:
                 knowledge_base_ids=kb_ids,
             )
 
+        # ===== 知识库归属校验（H3）：每个 kb 必须对创建者可读 =====
+        # 不校验时，任意登录用户可把他人 kb_id 塞进会话；
+        # 个人库时代靠 Milvus user_id 过滤兜底，共享库上线后该兜底
+        # 将按可见性分流，必须在会话创建口把住第一道门。
+        if kb_ids:
+            self._validate_kb_read(user_id=user_id, kb_ids=kb_ids)
+
         sess_id = generate_session_id()
         manager = get_mysql_manager()
         with manager.get_session() as db:
@@ -222,6 +229,34 @@ class ChatSessionService:
                     f"不在请求的 knowledge_base_ids={knowledge_base_ids} 中"
                 )
             return knowledge_base_ids
+
+    def _validate_kb_read(
+        self,
+        *,
+        user_id: str,
+        kb_ids: List[str],
+    ) -> None:
+        """校验会话绑定的每个知识库对创建者可读（KBAccess 统一判定）。
+
+        Raises:
+            ValueError: 存在不可读的知识库（上游转 422）
+        """
+        from src.db.mysql.repositories.business.knowledge_base_repo import (
+            knowledge_base_repo,
+        )
+        from src.service.knowledge.kb_access import resolve_kb_access
+
+        manager = get_mysql_manager()
+        with manager.get_session() as db:
+            denied = []
+            for kb_id in kb_ids:
+                kb = knowledge_base_repo.get_by_id(db, kb_id)
+                if kb is None or not resolve_kb_access(db, user_id, kb).can_read:
+                    denied.append(kb_id)
+        if denied:
+            raise ValueError(
+                f"无权访问以下知识库: {', '.join(denied)}"
+            )
 
     # ============================================================
     # 查询

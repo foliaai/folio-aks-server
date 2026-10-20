@@ -1,0 +1,35 @@
+# 本地开发镜像（根目录 docker-compose.dev.yml 专用）：
+# 只装系统依赖 + uv，Python 依赖不进镜像——容器启动时 uv sync 到具名卷 /opt/venv，
+# 源码由 compose bind mount 到 /app，改 pyproject/uv.lock 免重建镜像。
+# 生产镜像看同目录 Dockerfile。
+FROM python:3.13-slim
+
+# 与生产 Dockerfile 同款：LibreOffice（Word/PPT/Excel 转 PDF）+ 中文字体，
+# 保证 office 解析链路与宿主机（本机装了 LibreOffice.app）不降级
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libffi-dev \
+    fontconfig \
+    libreoffice-writer \
+    libreoffice-impress \
+    libreoffice-calc \
+    fonts-noto-cjk \
+    fonts-noto-cjk-extra \
+    fonts-wqy-zenhei \
+    fonts-wqy-microhei \
+    fonts-liberation \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+# 自定义 Windows / macOS 专有字体包及 Fontconfig 别名映射（与生产一致）
+COPY assets/fonts/ /usr/share/fonts/truetype/custom/
+RUN if [ -f /usr/share/fonts/truetype/custom/fonts.conf ]; then \
+        cp /usr/share/fonts/truetype/custom/fonts.conf /etc/fonts/local.conf; \
+    fi && fc-cache -fv
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
