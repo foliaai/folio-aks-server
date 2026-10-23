@@ -287,7 +287,16 @@ class SplitEndMessage(BaseMessage):
         default="unknown",
         description="检测到的文档语言"
     )
-    
+
+    # 解析来源（从 ParseEndMessage.parse_tool 透传）
+    parse_tool: Optional[str] = Field(
+        default=None,
+        description=(
+            "解析来源（markdown / mineru）。SectionSummary 建树据此分派策略："
+            "markdown → heading_level（标题层级即真值），其余 → 标题编号推断"
+        )
+    )
+
     # 前台进度完成标志（用户可见进度到此为 100%）
     frontend_complete: bool = Field(
         default=True,

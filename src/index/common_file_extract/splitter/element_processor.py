@@ -188,11 +188,12 @@ class ElementProcessor:
         section_id: Optional[str],
         document_id: Optional[str] = None,
         page_index: Optional[int] = None,
-        language: str = "unknown"
+        language: str = "unknown",
+        element_ids: Optional[List[str]] = None
     ) -> ChunkInfo:
         """
         创建代码块Chunk
-        
+
         Args:
             code_content: 代码内容
             code_language: 代码语言
@@ -200,13 +201,14 @@ class ElementProcessor:
             document_id: 文档ID
             page_index: 页码
             language: 文档语言
-        
+            element_ids: 关联的 Element ID 列表（文档溯源）
+
         Returns:
             ChunkInfo
         """
         # 组装标准Markdown代码块格式
         code_text = f"```{code_language}\n{code_content}\n```"
-        
+
         return ChunkInfo(
             chunk_type=ChunkType.CODE_BLOCK,
             section_id=section_id,
@@ -217,5 +219,61 @@ class ElementProcessor:
             },
             page_index=page_index,
             language=language,
-            metadata={"code_language": code_language}
+            metadata={"code_language": code_language},
+            element_ids=element_ids or []
+        )
+
+    @staticmethod
+    def create_code_block_chunk(
+        element: ElementInfo,
+        section_id: Optional[str],
+        document_id: Optional[str] = None,
+        language: str = "unknown"
+    ) -> ChunkInfo:
+        """
+        从 code_block 元素创建 Chunk（Markdown 解析链路）
+
+        元素 text 保留 md 围栏原文（```lang\\n...\\n``` 或缩进块），此处拆出
+        语言与内容后复用 create_code_chunk 重组标准围栏——输出与原文等价，
+        缩进代码块（无围栏）也被归一为标准围栏格式。
+
+        Args:
+            element: 原始 code_block 元素
+            section_id: 所属Section ID
+            document_id: 文档ID
+            language: 文档语言
+
+        Returns:
+            ChunkInfo
+        """
+        import re
+
+        raw = element.text or ""
+        fence_match = re.match(r"\A\s*```(\S*)[ \t]*\r?\n([\s\S]*?)\r?\n?\s*```\s*\Z", raw)
+        if fence_match:
+            code_language = fence_match.group(1)
+            code_content = fence_match.group(2)
+        else:
+            # 缩进代码块：无围栏，去掉公共缩进
+            code_language = ""
+            code_lines = raw.split("\n")
+            indents = [
+                len(line) - len(line.lstrip(" "))
+                for line in code_lines
+                if line.strip()
+            ]
+            strip_width = min(indents) if indents else 0
+            code_content = "\n".join(
+                line[strip_width:] if len(line) >= strip_width else ""
+                for line in code_lines
+            )
+
+        return ElementProcessor.create_code_chunk(
+            code_content=code_content,
+            code_language=code_language,
+            section_id=section_id,
+            document_id=document_id,
+            page_index=element.page_index,
+            language=language,
+            element_ids=[element.element_id]
         )

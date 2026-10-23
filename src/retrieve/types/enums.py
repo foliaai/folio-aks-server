@@ -38,6 +38,7 @@ class ElementType(str, Enum):
     TABLE = "table"
     IMAGE = "image"
     EQUATION = "equation"
+    CODE_BLOCK = "code_block"
 
 
 class SortOrder(str, Enum):

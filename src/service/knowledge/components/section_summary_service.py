@@ -96,6 +96,7 @@ class SectionSummaryService:
         language: str = "unknown",
         knowledge_base_id: Optional[str] = None,
         knowledge_base_name: Optional[str] = None,
+        parse_tool: Optional[str] = None,
     ) -> SectionSummaryResult:
         """
         编排整个文档的 section 摘要抽取（含建树 + 叶子 LLM + 父节点 rollup）。
@@ -105,7 +106,8 @@ class SectionSummaryService:
 
         流程：
         1. build_sections_from_payload：flat sections 列表
-        2. build_section_tree：从标题编号推断层级 + 父子关系 → section 树
+        2. build_section_tree：建树（策略按 parse_tool 分派：
+           markdown → heading_level（# 层级即真值），其余 → 标题编号推断）
         3. 叶子 section（有 chunk 的结构叶子）→ 并行 LLM 摘要
         4. 父节点后序遍历 rollup：LLM 合成子摘要为父摘要；LLM 失败降级为纯拼接
         5. 汇总所有 items 返回
@@ -135,8 +137,9 @@ class SectionSummaryService:
                 knowledge_base_name=knowledge_base_name,
             )
 
-        # Step 1: 建树
-        roots = self._build_tree(sections)
+        # Step 1: 建树（markdown 用 heading_level，其余编号推断）
+        strategy = "heading_level" if parse_tool == "markdown" else "numbering"
+        roots = self._build_tree(sections, strategy=strategy)
         traversal = post_order(roots)
 
         # Step 2: 并行 LLM 摘要（凡有自身 chunk 的节点：结构叶子 + 混合节点）
@@ -240,6 +243,6 @@ class SectionSummaryService:
     # ========== 内部辅助 ==========
 
     @staticmethod
-    def _build_tree(sections):
+    def _build_tree(sections, strategy: str = "numbering"):
         """建树的薄封装，便于在 Service 层打日志或扩展时统一入口。"""
-        return build_section_tree(sections)
+        return build_section_tree(sections, strategy=strategy)

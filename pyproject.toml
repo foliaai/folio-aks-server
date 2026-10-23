@@ -18,6 +18,7 @@ dependencies = [
     "litellm>=1.78.0",
     "loguru>=0.7.3",
     "lz4>=4.4.5",
+    "markdown-it-py>=3.0.0",
     "minio>=7.2.20",
     "motor>=3.7.1",
     "pydantic>=2.12.5",

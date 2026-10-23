@@ -25,6 +25,7 @@ class ElementType(str, Enum):
     IMAGE = "image"
     TABLE = "table"
     EQUATION = "equation"
+    CODE_BLOCK = "code_block"
     DISCARDED = "discarded"
 
 
@@ -165,6 +166,10 @@ class ElementInfo(BaseModel):
     def is_equation(self) -> bool:
         """判断是否为公式元素"""
         return self.element_type == ElementType.EQUATION
+
+    def is_code_block(self) -> bool:
+        """判断是否为代码块元素"""
+        return self.element_type == ElementType.CODE_BLOCK
     
     def to_mysql_dict(self) -> Dict[str, Any]:
         """
