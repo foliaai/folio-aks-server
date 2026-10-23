@@ -79,7 +79,7 @@ _config = get_config_manager()
 _SUPPORTED_FORMATS: list[str] = _config.get(
     "file_upload.supported_formats",
     [
-        "pdf", "docx", "pptx", "xlsx", "txt", "md", "json",
+        "pdf", "docx", "pptx", "xlsx", "txt", "md", "markdown", "json",
         "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp",
         "doc", "xls", "ppt", "csv",
     ],

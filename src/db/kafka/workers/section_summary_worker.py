@@ -166,6 +166,8 @@ class SectionSummaryWorker(BaseWorker):
                 language=message.language,
                 knowledge_base_id=message.knowledge_base_id,
                 knowledge_base_name=message.knowledge_base_name,
+                # 解析来源（markdown → heading_level 建树，其余编号推断）
+                parse_tool=message.parse_tool,
             )
 
             if not result.is_success():
