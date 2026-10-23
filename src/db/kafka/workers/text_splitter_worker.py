@@ -649,6 +649,8 @@ class TextSplitterWorker(BaseWorker):
             },
             total_length=split_result.total_chars,
             language=split_result.document_language,
+            # 解析来源透传，供 SectionSummary 建树分派策略（markdown → heading_level）
+            parse_tool=message.parse_tool,
             frontend_complete=True,
             brief_summary=(
                 f"文档已切分为 {split_result.total_chunks} 个文本块，"

@@ -689,6 +689,11 @@ class FileParserService:
                 "text": element.get("text", ""),
                 "text_format": element.get("text_format", "")
             }
+        elif element_type == "code_block":
+            content = {
+                "text": element.get("text", ""),
+                "code_language": element.get("code_language", "")
+            }
         elif element_type == "discarded":
             content = {
                 "text": element.get("text", "")
@@ -771,7 +776,10 @@ class FileParserService:
             status=status,
             elements=[],  # 数据将通过 Kafka 异步写入数据库
             document_metadata=document_metadata,
-            parse_tool="mineru",
+            # parser_source 标记解析来源（markdown 内联解析产 "markdown"），
+            # 沿 ParseEndMessage → split → SplitEndMessage 透传，section_summary
+            # 建树阶段据此分派策略；未标记的（MinerU 链路）默认 "mineru"
+            parse_tool=parse_result.get("parser_source") or "mineru",
             total_pages=total_pages,
             total_chars=len(md_content),
             document_language=document_language,

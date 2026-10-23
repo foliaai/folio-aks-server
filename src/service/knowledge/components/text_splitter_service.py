@@ -361,6 +361,27 @@ class TextSplitterService:
                 if buffer_page_index is None:
                     buffer_page_index = element.page_index
 
+            # 处理代码块 —— flush buffer 后独立成 chunk（围栏原文，不过文本清洗，
+            # 缩进结构得以保留；chunk 层 CODE_BLOCK 类型走独立检索路由）
+            elif element.is_code_block() and element.text:
+                chunks.extend(self._flush_text_buffer(
+                    text_buffer, buffer_element_ids, buffer_page_index,
+                    current_section_id, document_id, parse_result.document_language
+                ))
+                text_buffer.clear()
+                buffer_element_ids.clear()
+                buffer_page_index = None
+
+                code_chunk = self.element_processor.create_code_block_chunk(
+                    element=element,
+                    section_id=current_section_id,
+                    document_id=document_id,
+                    language=parse_result.document_language
+                )
+                chunks.append(code_chunk)
+
+                logger.debug(f"创建代码块Chunk: element_index={element.element_index}")
+
             # 处理图片 —— 先 flush buffer，再创建 Image Chunk
             elif element.is_image():
                 chunks.extend(self._flush_text_buffer(
