@@ -443,7 +443,7 @@ backup_count = 10
 # 文件处理配置
 [file_upload]
 # 支持的文件类型
-supported_formats = ["pdf", "docx", "pptx", "xlsx", "txt", "md", "markdown", "json", "csv", "doc", "xls", "ppt", "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]
+supported_formats = ["pdf", "docx", "pptx", "xlsx", "txt", "md", "markdown", "html", "htm", "json", "csv", "doc", "xls", "ppt", "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]
 # 最大文件大小（MB）
 max_file_size = 100
 # 文件上传临时目录

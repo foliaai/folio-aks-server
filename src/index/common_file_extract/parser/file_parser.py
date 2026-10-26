@@ -69,6 +69,11 @@ class FileParser:
         '.MD': 'markdown',
         '.markdown': 'markdown',
         '.MARKDOWN': 'markdown',
+        # HTML
+        '.html': 'html',
+        '.HTML': 'html',
+        '.htm': 'html',
+        '.HTM': 'html',
         # 数据
         '.json': 'json',
         '.JSON': 'json',
@@ -154,6 +159,8 @@ class FileParser:
                 parse_result = await FileParser._parse_txt(file_path, file_name)
             elif file_type == "markdown":
                 parse_result = await FileParser._parse_markdown(file_path, file_name)
+            elif file_type == "html":
+                parse_result = await FileParser._parse_html(file_path, file_name)
             elif file_type == "json":
                 parse_result = await FileParser._parse_json(file_path, file_name)
             elif file_type == "csv":
@@ -355,12 +362,32 @@ class FileParser:
             Dict: 解析结果
         """
         from src.index.common_file_extract.parser.md_parser import MarkdownParser
-        
+
         # 懒加载：创建 Markdown Parser
         md_parser = MarkdownParser()
-        
+
         # 调用解析
         return await md_parser.parse(file_path, file_name)
+
+    @staticmethod
+    async def _parse_html(file_path: Path, file_name: str) -> Dict:
+        """
+        解析 HTML 文件
+
+        Args:
+            file_path: 文件路径
+            file_name: 文件名
+
+        Returns:
+            Dict: 解析结果
+        """
+        from src.index.common_file_extract.parser.html_parser import HtmlParser
+
+        # 懒加载：创建 HTML Parser
+        html_parser = HtmlParser()
+
+        # 调用解析
+        return await html_parser.parse(file_path, file_name)
     
     @staticmethod
     async def _parse_json(file_path: Path, file_name: str) -> Dict:

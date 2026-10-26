@@ -108,6 +108,8 @@ _FILE_FORMAT_MAP: dict[str, str] = {
     "xlsx": "Microsoft Excel (OpenXML)",
     "txt": "Plain Text",
     "md": "Markdown",
+    "html": "HTML Document",
+    "htm": "HTML Document",
     "json": "JSON",
     "png": "PNG Image",
     "jpg": "JPEG Image",
