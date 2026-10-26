@@ -260,6 +260,43 @@ async def get_chunk_raw_image(
 # ==================== Chunk 定位信息 ====================
 
 
+def _build_type_ordinal_map(session: Session, element_rows) -> dict:
+    """
+    为一组元素构建「文档内同类型序号」映射（element_id → 0 起序号）。
+
+    供无 bbox 坐标的解析来源（markdown/html）做序号锚定：前端数渲染结果里
+    第 N 个 table/pre/img 即可定位。文档序 = (page_index, element_index)。
+    """
+    if not element_rows:
+        return {}
+    document_id = getattr(element_rows[0], "document_id", None)
+    if not document_id:
+        return {}
+
+    from src.db.mysql.models.base.element_meta_info import ElementMetaInfo
+
+    rows = (
+        session.query(
+            ElementMetaInfo.element_id,
+            ElementMetaInfo.element_type,
+            ElementMetaInfo.page_index,
+            ElementMetaInfo.element_index,
+        )
+        .filter(
+            ElementMetaInfo.document_id == document_id,
+            ElementMetaInfo.deleted == 0,
+        )
+        .all()
+    )
+
+    ordinal_map: dict = {}
+    counters: dict = {}
+    for row in sorted(rows, key=lambda r: (r.page_index or 0, r.element_index or 0)):
+        counters[row.element_type] = counters.get(row.element_type, 0) + 1
+        ordinal_map[row.element_id] = counters[row.element_type] - 1
+    return ordinal_map
+
+
 @router.get(
     "/{chunk_id}/position",
     response_model=ApiResponse[ChunkPositionResponse],
@@ -288,30 +325,39 @@ async def get_chunk_position(
     #    并用「首个有效元素的页码」作为定位跳转的目标页，使文本与图片/表格一致。
     elements: list[ElementPosition] = []
     raw_element_ids = getattr(meta, "element_ids", None) or []
-    if raw_element_ids:
-        for eid in raw_element_ids:
-            el = element_meta_info_repo.get_by_id(session, eid)
-            if not el or getattr(el, "deleted", 0) != 0:
-                continue
-            # 解析 page_position JSON 字符串
-            pos = getattr(el, "page_position", None)
-            parsed_pos = None
-            if pos:
-                try:
-                    import json as _json
-                    parsed_pos = _json.loads(pos)
-                    if not isinstance(parsed_pos, list):
-                        parsed_pos = None
-                except Exception:
+    element_rows = []
+    for eid in raw_element_ids:
+        el = element_meta_info_repo.get_by_id(session, eid)
+        if not el or getattr(el, "deleted", 0) != 0:
+            continue
+        element_rows.append(el)
+
+    # 同类型元素序号锚：无 bbox 坐标的解析来源（markdown/html）无法用
+    # page_position 画框，前端改用「文档内第 N 个同类型元素」定位渲染结果。
+    # 全文档一次轻量列查询（仅四列），按 (page_index, element_index) 文档序
+    # 给每个元素在其类型内编号。
+    ordinal_map = _build_type_ordinal_map(session, element_rows)
+    for el in element_rows:
+        # 解析 page_position JSON 字符串
+        pos = getattr(el, "page_position", None)
+        parsed_pos = None
+        if pos:
+            try:
+                import json as _json
+                parsed_pos = _json.loads(pos)
+                if not isinstance(parsed_pos, list):
                     parsed_pos = None
-            elements.append(
-                ElementPosition(
-                    element_id=getattr(el, "element_id", eid),
-                    element_type=getattr(el, "element_type", "unknown"),
-                    page_index=getattr(el, "page_index", None),
-                    page_position=parsed_pos,
-                )
+            except Exception:
+                parsed_pos = None
+        elements.append(
+            ElementPosition(
+                element_id=getattr(el, "element_id", eid),
+                element_type=getattr(el, "element_type", "unknown"),
+                page_index=getattr(el, "page_index", None),
+                page_position=parsed_pos,
+                type_ordinal=ordinal_map.get(getattr(el, "element_id", eid)),
             )
+        )
 
     # 定位目标页：优先取首个有效元素的页码（与实际高亮元素所在页对齐）；
     # 缺失时回退到 chunk 级 page_index。

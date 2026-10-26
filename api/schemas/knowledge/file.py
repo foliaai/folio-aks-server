@@ -121,6 +121,14 @@ class ElementPosition(BaseModel):
             "坐标空间见 ChunkPositionResponse.coord_space"
         ),
     )
+    type_ordinal: Optional[int] = Field(
+        default=None,
+        description=(
+            "该元素在文档内全部同类型元素中的序号（0 起，按 (page_index, "
+            "element_index) 文档序）。无 bbox 坐标的解析来源（markdown/html）"
+            "用它做序号锚定：前端数渲染结果里第 N 个 table/pre/img 定位高亮。"
+        ),
+    )
 
 
 class ChunkPositionResponse(BaseModel):
