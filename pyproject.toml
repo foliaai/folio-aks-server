@@ -34,6 +34,8 @@ dependencies = [
     "sqlalchemy>=2.0.45",
     "toml>=0.10.2",
     "uvicorn>=0.41.0",
+    "beautifulsoup4>=4.15.0",
+    "lxml>=6.1.1",
 ]
 
 [[tool.uv.index]]
