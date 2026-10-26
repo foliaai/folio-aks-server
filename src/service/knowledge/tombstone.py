@@ -129,18 +129,29 @@ def exclude_deleted(filters: MetadataFilter) -> MetadataFilter:
     否则已删文件的向量在清理完成前仍会被召回到回答里。
 
     口径：filters 带 user_id（私有库/未指定库）→ 按 (user, kb) 排除；
-    filters 只带 kb（共享库分流后的形态）→ 按 kb 聚合排除（全员生效）。
+    filters 只带 kb（共享库分流后的形态）→ 按 kb 聚合排除（全员生效）；
+    filters 带多 kb（会话绑定多库）→ 逐 kb 聚合后并集。
 
     Returns:
         传入的 filters 本身，便于链式书写
     """
-    kb_id = filters.knowledge_base_id
-    if kb_id and not filters.user_id:
-        excluded = get_kb_tombstoned_document_ids(kb_id)
+    kb_ids = list(filters.knowledge_base_ids or [])
+    if len(kb_ids) > 1:
+        excluded: List[str] = []
+        seen: set = set()
+        for kb_id in kb_ids:
+            for doc_id in get_kb_tombstoned_document_ids(kb_id):
+                if doc_id not in seen:
+                    seen.add(doc_id)
+                    excluded.append(doc_id)
     else:
-        excluded = get_tombstoned_document_ids(
-            filters.user_id or "", kb_id
-        )
+        kb_id = filters.knowledge_base_id or (kb_ids[0] if kb_ids else None)
+        if kb_id and not filters.user_id:
+            excluded = get_kb_tombstoned_document_ids(kb_id)
+        else:
+            excluded = get_tombstoned_document_ids(
+                filters.user_id or "", kb_id
+            )
     if excluded:
         filters.exclude_document_ids = excluded
     return filters

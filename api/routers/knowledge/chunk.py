@@ -36,8 +36,24 @@ def _require_chunk_kb_read(session: Session, meta, user_id: str) -> None:
     """chunk 归属校验（H2 修复）：chunk → 所属知识库 → can_read。
 
     无法定位所属知识库的 chunk 一律拒绝（404），避免无主数据成为旁路。
+    历史行的 chunk_meta_info.knowledge_base_id 为 NULL（写入侧 2026-10-26
+    才补齐），此处回退到 chunk_section_document 权威映射表取 kb。
     """
     kb_id = getattr(meta, "knowledge_base_id", None)
+    if not kb_id:
+        from src.db.mysql.models.base.chunk_section_document import (
+            ChunkSectionDocument,
+        )
+
+        row = (
+            session.query(ChunkSectionDocument.knowledge_base_id)
+            .filter(
+                ChunkSectionDocument.chunk_id == getattr(meta, "chunk_id", None),
+                ChunkSectionDocument.deleted == 0,
+            )
+            .first()
+        )
+        kb_id = row[0] if row else None
     if not kb_id:
         raise HTTPException(status_code=404, detail="Chunk 不存在或已删除")
     require_kb_access(session, user_id, kb_id, level="read")
