@@ -33,6 +33,7 @@ class MetadataFilter(BaseModel):
     exclude_document_ids: Optional[List[str]] = None
     section_ids: Optional[List[str]] = None
     knowledge_base_id: Optional[str] = None
+    knowledge_base_ids: Optional[List[str]] = None
     knowledge_base_name: Optional[str] = None
     label_id: Optional[str] = None
     source_type: Optional[str] = None
@@ -56,7 +57,10 @@ class MetadataFilter(BaseModel):
         if self.exclude_document_ids:
             ids_str = ", ".join(f"'{d}'" for d in self.exclude_document_ids)
             parts.append(f"document_id not in [{ids_str}]")
-        if self.knowledge_base_id:
+        if self.knowledge_base_ids:
+            ids_str = ", ".join(f"'{k}'" for k in self.knowledge_base_ids)
+            parts.append(f"knowledge_base_id in [{ids_str}]")
+        elif self.knowledge_base_id:
             parts.append(f"knowledge_base_id == '{self.knowledge_base_id}'")
         if self.label_id:
             parts.append(f"label_id == '{self.label_id}'")

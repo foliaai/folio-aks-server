@@ -773,7 +773,16 @@ class SplitResult(BaseModel):
                 }
                 for c in self.chunks
             ],
-            "chunk_meta_info": [c.to_mysql_dict() for c in self.chunks],
+            # chunk_meta_info 的行字典（to_mysql_dict）不含 kb，这里补上：
+            # chunk 三端点判权（raw-image 等）依赖该列，缺省会全量 404
+            "chunk_meta_info": [
+                {
+                    **c.to_mysql_dict(),
+                    "knowledge_base_id": self.knowledge_base_id or "",
+                    "knowledge_base_name": self.knowledge_base_name or "",
+                }
+                for c in self.chunks
+            ],
         }
     
     def get_mongodb_data(self) -> Dict[str, List[Dict[str, Any]]]:

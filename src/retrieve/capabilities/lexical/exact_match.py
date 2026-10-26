@@ -57,15 +57,16 @@ class ExactMatch(BaseCapability):
         mongo_query = self._build_mongo_query(query.keywords, query.match_mode)
 
         # 透传 MetadataFilter：先在 MySQL 解析 chunk_id 集合，再注入 _id $in 条件
+        # （2026-10-26 起解析失败 fail-closed 返回空集，不再回退无限制查询）
         if filter_has_chunk_scope(query.filters):
             allowed_ids = resolve_chunk_ids_from_filters(query.filters)
             if allowed_ids is None:
-                # MySQL 不可用 → 保守起见仍然执行不带 ID 限制的查询
-                pass
-            elif not allowed_ids:
+                # 理论不可达（前置 filter_has_chunk_scope 已保证有裁剪字段），
+                # 防御性 fail-closed
                 return RetrieveResult(items=[], total_count=0)
-            else:
-                mongo_query["_id"] = {"$in": allowed_ids}
+            if not allowed_ids:
+                return RetrieveResult(items=[], total_count=0)
+            mongo_query["_id"] = {"$in": allowed_ids}
 
         results = await ChunkData.find(
             mongo_query,
