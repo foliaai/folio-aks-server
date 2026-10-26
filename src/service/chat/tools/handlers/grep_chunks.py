@@ -107,10 +107,13 @@ def _build_filters(
     from src.service.knowledge.kb_access import build_kb_scoped_filter
     from src.service.knowledge.tombstone import exclude_deleted
 
-    # 可见性分流：共享库（team/public）向量按 kb 隔离，不能带 user_id 过滤
-    kb_id = kit.knowledge_base_ids[0] if kit.knowledge_base_ids else None
+    # 可见性分流：共享库（team/public）向量按 kb 隔离，不能带 user_id 过滤。
+    # 多 kb 会话按全量列表过滤，不再只取第一个
     filters = build_kb_scoped_filter(
-        kit.user_id, kb_id, chunk_type=chunk_type
+        kit.user_id,
+        None,
+        knowledge_base_ids=list(kit.knowledge_base_ids or []),
+        chunk_type=chunk_type,
     )
     if document_id:
         filters.document_id = document_id.strip()

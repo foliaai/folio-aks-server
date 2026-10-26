@@ -145,6 +145,7 @@ def build_kb_scoped_filter(
     user_id: str,
     knowledge_base_id: Optional[str],
     *,
+    knowledge_base_ids=None,
     document_id: Optional[str] = None,
     document_ids=None,
     chunk_type: Optional[str] = None,
@@ -154,6 +155,8 @@ def build_kb_scoped_filter(
     - 未指定 kb → user_id 过滤（现状语义：我的库全集）
     - private kb → user_id + kb（纵深防御保留）
     - team/public kb → 仅 kb（共享库向量按 kb 隔离，带 user_id 必然 0 命中）
+    - 多 kb（``knowledge_base_ids`` 非空，会话绑定多库场景）→ 逐库判权后
+      ``knowledge_base_id in [...]``；全部为私库时额外保留 user_id 纵深防御
 
     墓碑排除（exclude_deleted）由调用方按返回的 filter 形态自行套用。
 
@@ -164,7 +167,22 @@ def build_kb_scoped_filter(
     from src.retrieve.types.query import MetadataFilter
 
     kwargs: dict = {}
-    if knowledge_base_id:
+    if knowledge_base_ids:
+        kb_list = [k for k in dict.fromkeys(knowledge_base_ids) if k]
+        manager = get_mysql_manager()
+        with manager.get_session() as session:
+            kbs = [
+                require_kb_access(session, user_id, k, level="read")
+                for k in kb_list
+            ]
+            all_private = all(
+                (kb.visibility or VISIBILITY_PRIVATE) == VISIBILITY_PRIVATE
+                for kb in kbs
+            )
+        if all_private:
+            kwargs["user_id"] = user_id
+        filters = MetadataFilter(knowledge_base_ids=kb_list, **kwargs)
+    elif knowledge_base_id:
         manager = get_mysql_manager()
         with manager.get_session() as session:
             kb = require_kb_access(
@@ -177,10 +195,11 @@ def build_kb_scoped_filter(
         if not shared:
             kwargs["user_id"] = user_id
         kwargs["knowledge_base_id"] = knowledge_base_id
+        filters = MetadataFilter(**kwargs)
     else:
         kwargs["user_id"] = user_id
+        filters = MetadataFilter(**kwargs)
 
-    filters = MetadataFilter(**kwargs)
     if document_id:
         filters.document_id = document_id
     if document_ids:

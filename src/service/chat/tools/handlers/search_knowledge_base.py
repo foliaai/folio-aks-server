@@ -152,11 +152,14 @@ async def handle(
     from src.service.knowledge.tombstone import exclude_deleted
 
     # 可见性分流：共享库（team/public）向量按 kb 隔离，不能带 user_id 过滤
-    # （否则只能检索到自己上传的部分）；会话绑定的库已不可访问时软降级
+    # （否则只能检索到自己上传的部分）；会话绑定的库已不可访问时软降级。
+    # 多 kb 会话按全量列表过滤（knowledge_base_id in [...]），不再只取第一个
     try:
-        kb_id = kit.knowledge_base_ids[0] if kit.knowledge_base_ids else None
         filters = build_kb_scoped_filter(
-            kit.user_id, kb_id, chunk_type=chunk_type
+            kit.user_id,
+            None,
+            knowledge_base_ids=list(kit.knowledge_base_ids or []),
+            chunk_type=chunk_type,
         )
     except Exception:
         return "search_knowledge_base: 当前会话绑定的知识库已不可访问。"
