@@ -107,7 +107,7 @@ class SectionSummaryService:
         流程：
         1. build_sections_from_payload：flat sections 列表
         2. build_section_tree：建树（策略按 parse_tool 分派：
-           markdown → heading_level（# 层级即真值），其余 → 标题编号推断）
+           markdown/html → heading_level（标题层级即真值），其余 → 标题编号推断）
         3. 叶子 section（有 chunk 的结构叶子）→ 并行 LLM 摘要
         4. 父节点后序遍历 rollup：LLM 合成子摘要为父摘要；LLM 失败降级为纯拼接
         5. 汇总所有 items 返回
@@ -137,8 +137,9 @@ class SectionSummaryService:
                 knowledge_base_name=knowledge_base_name,
             )
 
-        # Step 1: 建树（markdown 用 heading_level，其余编号推断）
-        strategy = "heading_level" if parse_tool == "markdown" else "numbering"
+        # Step 1: 建树（markdown/html 的标题层级即真值，用 heading_level；
+        # MinerU 系标题 text_level 扁平，走编号推断）
+        strategy = "heading_level" if parse_tool in ("markdown", "html") else "numbering"
         roots = self._build_tree(sections, strategy=strategy)
         traversal = post_order(roots)
 
