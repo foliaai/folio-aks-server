@@ -325,6 +325,118 @@ async def get_file_preview(
     )
 
 
+# ==================== Excel 内容视图（元素流驱动预览） ====================
+
+
+@router.get(
+    "/{file_id}/excel-content",
+    summary="获取 Excel 文件内容视图（元素流：工作表分组 + 表格/图片卡片）",
+    description=(
+        "xlsx/xls 的预览数据源：MySQL element_meta_info（顺序/类型）+ MongoDB "
+        "element_data（内容）按 page_index=工作表 分组组装；图片元素签发"
+        "MinIO 预签名 URL。卡片带 element_id，前端框选直接按 id 匹配。"
+    ),
+)
+async def get_excel_content(
+    file_id: str,
+    user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_db_session),
+    storage: StorageManager = Depends(get_storage_manager),
+) -> ApiResponse:
+    from sqlalchemy import text as _text
+
+    from src.db.mongodb.mongodb_manager import get_mongodb_manager
+
+    file_record = _require_file_access(session, user_id, file_id, "read")
+
+    suffix = (getattr(file_record, "file_suffix", None) or "").lower()
+    if suffix not in (".xlsx", ".xls"):
+        raise HTTPException(status_code=400, detail="仅支持 xlsx/xls 文件")
+
+    document_id = getattr(file_record, "document_id", None)
+    if not document_id:
+        raise HTTPException(status_code=400, detail="文件尚未完成解析，无法预览")
+
+    rows = session.execute(
+        _text(
+            "SELECT element_id, page_index, element_type, text_level, "
+            "bucket_name, image_file_path "
+            "FROM element_meta_info "
+            "WHERE document_id = :d AND deleted = 0 "
+            "ORDER BY page_index, element_index"
+        ),
+        {"d": document_id},
+    ).mappings().all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="文件没有可预览的元素")
+
+    ids = [r["element_id"] for r in rows]
+    mongo = await get_mongodb_manager()
+    db = await mongo.get_database()
+    contents: dict = {}
+    async for doc in db.element_data.find({"_id": {"$in": ids}}, {"content": 1}):
+        contents[doc["_id"]] = doc.get("content") or {}
+
+    def join_ann(v) -> Optional[str]:
+        if isinstance(v, list):
+            s = ", ".join(x for x in v if x)
+            return s or None
+        return v or None
+
+    # page_index 分组；组内首个 text 标题元素即工作表名
+    sheets: dict = {}
+    sheet_titles: dict = {}
+    for r in rows:
+        page = r["page_index"] or 0
+        content = contents.get(r["element_id"], {})
+        if r["element_type"] == "text" and r["text_level"]:
+            if page not in sheet_titles:
+                sheet_titles[page] = str(content.get("text") or f"Sheet {page + 1}")
+            continue  # 标题元素只作标签，不渲染卡片
+        card = {
+            "element_id": r["element_id"],
+            "type": r["element_type"],
+        }
+        if r["element_type"] == "table":
+            card["table_body"] = content.get("table_body") or ""
+            card["caption"] = join_ann(content.get("table_caption"))
+            card["footnote"] = join_ann(content.get("table_footnote"))
+        elif r["element_type"] == "image":
+            card["caption"] = join_ann(content.get("image_caption"))
+            bucket, path = r["bucket_name"], r["image_file_path"]
+            if bucket and path:
+                try:
+                    card["image_url"] = await storage.get_preview_url(
+                        f"{bucket}/{path}", 3600
+                    )
+                except Exception as e:
+                    logger.warning(f"excel 视图图片预签名失败: {r['element_id']}: {e}")
+        elif content.get("text"):
+            card["text"] = str(content["text"])
+        else:
+            continue  # 无内容的元素不渲染
+        sheets.setdefault(page, []).append(card)
+
+    sheet_views = [
+        {
+            "page_index": page,
+            "title": sheet_titles.get(page, f"Sheet {page + 1}"),
+            "elements": cards,
+        }
+        for page, cards in sorted(sheets.items())
+    ]
+
+    from api.schemas.knowledge.file import ExcelContentResponse
+
+    data = ExcelContentResponse(
+        file_id=file_id,
+        file_name=file_record.file_name,
+        total_sheets=len(sheet_views),
+        sheets=sheet_views,
+    )
+    return ApiResponse.success(data=data, message="Excel 内容视图获取成功")
+
+
 # ==================== 文件原始内容（流式返回，供前端 PDF 预览） ====================
 
 

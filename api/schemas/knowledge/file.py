@@ -150,6 +150,42 @@ class ChunkPositionResponse(BaseModel):
     )
 
 
+# ==================== Excel 内容视图（元素流驱动预览） ====================
+
+
+class ExcelCardElement(BaseModel):
+    """Excel 视图的卡片元素（table/image/孤立文本行）"""
+
+    element_id: str = Field(..., description="元素 ID（框选按 element_id 匹配）")
+    type: str = Field(..., description="table | image | text")
+    text: Optional[str] = Field(default=None, description="text 元素内容")
+    caption: Optional[str] = Field(default=None, description="表格标题/图片说明")
+    footnote: Optional[str] = Field(default=None, description="表格脚注")
+    table_body: Optional[str] = Field(default=None, description="表格 HTML")
+    image_url: Optional[str] = Field(
+        default=None, description="图片预签名 URL（上传失败/签发失败为 null）"
+    )
+
+
+class ExcelSheetView(BaseModel):
+    """一个工作表的视图（page_index = 工作表序号）"""
+
+    page_index: int = Field(..., description="工作表序号（0 起）")
+    title: str = Field(..., description="工作表名（sheet 标题元素）")
+    elements: List[ExcelCardElement] = Field(
+        default_factory=list, description="卡片元素（不含 sheet 标题元素）"
+    )
+
+
+class ExcelContentResponse(BaseModel):
+    """Excel 文件内容视图响应"""
+
+    file_id: str = Field(..., description="文件 ID")
+    file_name: str = Field(..., description="文件名")
+    total_sheets: int = Field(..., description="工作表数")
+    sheets: List[ExcelSheetView] = Field(default_factory=list)
+
+
 # ==================== 文件删除（软删除） ====================
 
 
