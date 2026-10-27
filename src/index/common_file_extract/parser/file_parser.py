@@ -269,20 +269,19 @@ class FileParser:
     async def _parse_excel(file_path: Path, file_name: str) -> Dict:
         """
         解析 Excel 文件
-        
-        Args:
-            file_path: 文件路径
-            file_name: 文件名
-            
-        Returns:
-            Dict: 解析结果
+
+        策略：xlsx 直读（openpyxl）；xls 先 LibreOffice 转 xlsx 再进同一链路。
+        工作表=Section（sheet 名标题元素），工作表内按 TableRegion 产出表格元素。
         """
         from src.index.common_file_extract.parser.excel_parser import ExcelParser
-        
-        # 懒加载：创建 Excel Parser
-        excel_parser = ExcelParser()
-        
-        # 调用解析
+        from src.utils.config_manager import get_config_manager
+
+        config = get_config_manager()
+        libreoffice_cfg = config.get_libreoffice_config()
+        excel_parser = ExcelParser(
+            soffice_path=libreoffice_cfg.get("soffice_path", "soffice"),
+            convert_timeout=libreoffice_cfg.get("convert_timeout", 120),
+        )
         return await excel_parser.parse(file_path, file_name)
     
     @staticmethod
@@ -426,24 +425,24 @@ class FileParser:
     async def _parse_csv(file_path: Path, file_name: str) -> Dict:
         """
         解析 CSV 文件
-        
-        Args:
-            file_path: 文件路径
-            file_name: 文件名
-            
-        Returns:
-            Dict: 解析结果
+
+        表体序列化为 HTML（与 MinerU/excel 契约一致，引用浮层可渲染表格），
+        首行即表头（split_large_table 每片重复表头）。
         """
         import csv
-        
+        import html as _html
+
         rows = []
         with open(file_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             rows = list(reader)
-        
-        # 将 CSV 转为表格格式
-        table_body = "\n".join([",".join(row) for row in rows])
-        
+
+        trs = [
+            "<tr>" + "".join(f"<td>{_html.escape(cell)}</td>" for cell in row) + "</tr>"
+            for row in rows
+        ]
+        caption = file_path.stem
+
         return {
             "total_pages": 1,
             "struct_content": {
@@ -452,7 +451,8 @@ class FileParser:
                     "page_info": [{
                         "type": "table",
                         "element_index": 0,
-                        "table_body": table_body,
+                        "table_body": "<table>" + "".join(trs) + "</table>",
+                        "table_caption": [caption] if caption else [],
                         "bbox": []
                     }]
                 }]

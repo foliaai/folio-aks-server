@@ -13,7 +13,11 @@ jobs:
         run: |
           set -e
           cd ${{ secrets.JP_DEPLOY_PATH }}/folio-aks-server
-          git pull origin jp_model_lake_adapt
+          # 部署目录镜像远端：fetch+checkout+reset 硬对齐，防本地 commit/落错分支
+          # 引发的 pull 分叉 fatal，且能自愈 checkout 分支错位（.env untracked 不受影响）
+          git fetch origin
+          git checkout jp_model_lake_adapt
+          git reset --hard origin/jp_model_lake_adapt
           docker compose -f docker-compose.jp.yml up -d --build
           docker image prune -f
           echo "✅ AKS JP deployed at $(date)"

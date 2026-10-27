@@ -137,9 +137,9 @@ class SectionSummaryService:
                 knowledge_base_name=knowledge_base_name,
             )
 
-        # Step 1: 建树（markdown/html 的标题层级即真值，用 heading_level；
+        # Step 1: 建树（markdown/html/excel 的标题层级即真值，用 heading_level；
         # MinerU 系标题 text_level 扁平，走编号推断）
-        strategy = "heading_level" if parse_tool in ("markdown", "html") else "numbering"
+        strategy = "heading_level" if parse_tool in ("markdown", "html", "excel") else "numbering"
         roots = self._build_tree(sections, strategy=strategy)
         traversal = post_order(roots)
 
