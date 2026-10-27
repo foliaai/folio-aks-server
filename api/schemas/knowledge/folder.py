@@ -93,6 +93,13 @@ class FileInfo(BaseModel):
     status: Optional[int] = Field(default=None, description="处理状态")
     knowledge_base_id: str = Field(default="", description="所属知识库ID")
     description: Optional[str] = Field(default=None, description="文件描述")
+    user_id: Optional[str] = Field(
+        default=None,
+        description="上传者用户ID（共享库内即上传成员，个人库为库主人）",
+    )
+    create_time: Optional[str] = Field(
+        default=None, description="上传时间（ISO 格式）"
+    )
 
 
 class FileListResponse(BaseModel):

@@ -114,3 +114,10 @@ class TeamMemberRoleUpdateRequest(BaseModel):
     role: str = Field(
         ..., description="目标角色：admin=设为管理员 / member=降为普通成员"
     )
+
+
+class TeamOwnerTransferRequest(BaseModel):
+    """转让负责人请求（owner 可转；平台 admin 可强转兜底离职死档）"""
+    user_id: str = Field(
+        ..., min_length=1, description="新负责人的用户ID（须为现有成员）"
+    )
