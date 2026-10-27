@@ -68,6 +68,10 @@ from src.service.knowledge.kb_access import require_kb_access
 router = APIRouter(tags=["Folder"])
 
 
+def _iso(dt) -> Optional[str]:
+    return dt.isoformat() if dt else None
+
+
 def _to_file_info(file: WorkspaceFileSystem) -> FileInfo:
     """将文件 ORM 模型转为 Pydantic 响应模型"""
     return FileInfo(
@@ -79,6 +83,8 @@ def _to_file_info(file: WorkspaceFileSystem) -> FileInfo:
         status=file.status,
         knowledge_base_id=file.knowledge_base_id or "",
         description=file.description,
+        user_id=file.user_id,
+        create_time=_iso(file.create_time),
     )
 
 
