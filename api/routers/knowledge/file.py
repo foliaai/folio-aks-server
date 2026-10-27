@@ -120,6 +120,8 @@ async def search_files(
             status=r.status,
             knowledge_base_id=r.knowledge_base_id or "",
             description=r.description,
+            user_id=r.user_id,
+            create_time=r.create_time.isoformat() if r.create_time else None,
         )
         for r in records
     ]

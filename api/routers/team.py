@@ -13,10 +13,11 @@
       POST   /api/team                        - 创建团队（创建者即 owner）
       GET    /api/team/list                   - 我相关的团队（own + 加入）
       GET    /api/team/{team_id}              - 团队详情 + 成员列表
-      PUT    /api/team/{team_id}              - 改名/描述（owner）
+      PUT    /api/team/{team_id}              - 改名/描述（owner/admin）
       DELETE /api/team/{team_id}              - 解散（owner，有库绑定 409）
-      POST   /api/team/{team_id}/members      - 批量加成员（owner）
-      DELETE /api/team/{team_id}/members/{uid} - 移除成员（owner，不可移 owner）
+      POST   /api/team/{team_id}/members      - 批量加成员（owner/admin）
+      DELETE /api/team/{team_id}/members/{uid} - 移除成员（owner/admin）
+      PUT    /api/team/{team_id}/owner        - 转让负责人（owner/平台admin）
 
     JP 的"从部门导入"不是这里的专属端点：前端先调 auth 的部门成员 API
     拿 user_id 列表，随创建请求的 member_user_ids 一次带入（快照语义）。
@@ -45,6 +46,7 @@ from api.schemas.team import (
     TeamMemberAddRequest,
     TeamMemberInfo,
     TeamMemberRoleUpdateRequest,
+    TeamOwnerTransferRequest,
     TeamUpdateRequest,
 )
 from src.db.mysql.models.business.team import Team
@@ -446,3 +448,71 @@ async def update_team_member_role(
         f"role={request.role}, operator={user_id}"
     )
     return ApiResponse.success(message="成员角色已更新")
+
+
+@router.put(
+    "/{team_id}/owner",
+    response_model=ApiResponse,
+    summary="转让负责人（owner / 平台 admin）",
+    description=(
+        "将负责人（owner）转让给另一位现有成员，原负责人降为管理员。"
+        "团队级权限（解散、调整角色）随之移交；知识库创建者对库本身的"
+        "管理权不受影响（KBAccess 的创建者分支）。"
+        "平台 admin（FOLIO_AUTH_ADMIN_USER_IDS）可不在团队内强转，"
+        "兜底负责人离职后的死档场景。"
+    ),
+)
+async def transfer_team_owner(
+    team_id: str,
+    request: TeamOwnerTransferRequest,
+    user_id: str = Depends(get_current_user_id),
+    session: Session = Depends(get_db_session),
+) -> ApiResponse:
+    from src.service.knowledge.kb_access import is_platform_admin
+
+    team = team_repo.get_by_id(session, team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="团队不存在")
+
+    my_role = team_member_repo.get_member_role(session, team_id, user_id)
+    if my_role != "owner" and not is_platform_admin(user_id):
+        raise HTTPException(
+            status_code=403, detail="仅团队负责人或平台管理员可转让负责人"
+        )
+
+    new_owner_id = request.user_id.strip()
+    target_role = team_member_repo.get_member_role(session, team_id, new_owner_id)
+    if target_role is None:
+        raise HTTPException(status_code=404, detail="目标用户不是团队成员")
+    if target_role == "owner":
+        raise HTTPException(status_code=400, detail="目标已是团队负责人")
+
+    current_owner = (
+        session.query(TeamMember)
+        .filter(TeamMember.team_id == team_id, TeamMember.role == "owner")
+        .first()
+    )
+
+    try:
+        # 一事务内两行互换：目标成员升 owner，原 owner 降 admin
+        session.query(TeamMember).filter(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == new_owner_id,
+        ).update({"role": "owner"}, synchronize_session="fetch")
+        if current_owner is not None:
+            session.query(TeamMember).filter(
+                TeamMember.team_id == team_id,
+                TeamMember.user_id == current_owner.user_id,
+            ).update({"role": "admin"}, synchronize_session="fetch")
+        session.commit()
+    except SQLAlchemyError as e:
+        session.rollback()
+        logger.error(f"转让团队负责人失败: {e}")
+        raise HTTPException(status_code=500, detail="转让负责人失败")
+
+    logger.info(
+        f"转让团队负责人: team_id={team_id}, "
+        f"{current_owner.user_id if current_owner else '?'} -> {new_owner_id}, "
+        f"operator={user_id}"
+    )
+    return ApiResponse.success(message="负责人已转让")
