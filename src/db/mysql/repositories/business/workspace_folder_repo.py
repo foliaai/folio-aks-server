@@ -16,6 +16,7 @@ import uuid
 from typing import List, Optional
 
 from loguru import logger
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -151,7 +152,9 @@ class WorkspaceFolderRepository(BaseRepository[WorkspaceFolder]):
                 self.model.user_id == user_id,
                 self.model.knowledge_base_id == knowledge_base_id,
                 self.model.deleted == 0
-            ).order_by(self.model.depth, self.model.sort_order).all()
+            ).order_by(
+                self.model.depth, self.model.sort_order, self.model.create_time
+            ).all()
             
             logger.debug(
                 f"查询到{len(results)}个WorkspaceFolder: "
@@ -194,7 +197,9 @@ class WorkspaceFolderRepository(BaseRepository[WorkspaceFolder]):
                     self.model.parent_folder_id == parent_folder_id
                 )
             
-            results = query.order_by(self.model.sort_order).all()
+            results = query.order_by(
+                self.model.sort_order, self.model.create_time
+            ).all()
             
             logger.debug(
                 f"查询到{len(results)}个子文件夹: "
@@ -520,7 +525,7 @@ class WorkspaceFolderRepository(BaseRepository[WorkspaceFolder]):
         session: Session,
         knowledge_base_id: str,
     ) -> List[WorkspaceFolder]:
-        """知识库下全部存活文件夹（平铺，按 depth + sort_order）"""
+        """知识库下全部存活文件夹（平铺，按 depth + sort_order + create_time）"""
         try:
             return (
                 session.query(self.model)
@@ -528,12 +533,69 @@ class WorkspaceFolderRepository(BaseRepository[WorkspaceFolder]):
                     self.model.knowledge_base_id == knowledge_base_id,
                     self.model.deleted == 0,
                 )
-                .order_by(self.model.depth, self.model.sort_order)
+                .order_by(
+                    self.model.depth,
+                    self.model.sort_order,
+                    self.model.create_time,
+                )
                 .all()
             )
         except SQLAlchemyError as e:
             logger.error(f"kb维度查询文件夹失败: {e}")
             return []
+
+    def next_sort_order_in_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+        parent_folder_id: Optional[str],
+    ) -> int:
+        """同级（同父）文件夹当前最大 sort_order + 1，新建文件夹排尾用"""
+        try:
+            query = session.query(func.max(self.model.sort_order)).filter(
+                self.model.knowledge_base_id == knowledge_base_id,
+                self.model.deleted == 0,
+            )
+            if parent_folder_id is None:
+                query = query.filter(self.model.parent_folder_id.is_(None))
+            else:
+                query = query.filter(
+                    self.model.parent_folder_id == parent_folder_id
+                )
+            current_max = query.scalar()
+            return (current_max or 0) + 1
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度查询同级文件夹最大序号失败: {e}")
+            return 1
+
+    def reorder_folders_in_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+        parent_folder_id: Optional[str],
+        ordered_folder_ids: List[str],
+    ) -> int:
+        """按给定顺序固化同级文件夹的 sort_order（0..n-1）。
+
+        未列出的存活行不动。不提交，由调用方事务控制。
+        """
+        updated = 0
+        try:
+            for index, folder_id in enumerate(ordered_folder_ids):
+                result = (
+                    session.query(self.model)
+                    .filter(
+                        self.model.knowledge_base_id == knowledge_base_id,
+                        self.model.folder_id == folder_id,
+                        self.model.deleted == 0,
+                    )
+                    .update({"sort_order": index}, synchronize_session=False)
+                )
+                updated += result
+            return updated
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度重排同级文件夹失败: {e}")
+            raise
 
     def get_children_in_kb(
         self,
@@ -553,7 +615,9 @@ class WorkspaceFolderRepository(BaseRepository[WorkspaceFolder]):
                 query = query.filter(
                     self.model.parent_folder_id == parent_folder_id
                 )
-            return query.order_by(self.model.sort_order).all()
+            return query.order_by(
+                self.model.sort_order, self.model.create_time
+            ).all()
         except SQLAlchemyError as e:
             logger.error(f"kb维度查询子文件夹失败: {e}")
             return []
@@ -655,8 +719,13 @@ class WorkspaceFolderRepository(BaseRepository[WorkspaceFolder]):
         folder_id: str,
         target_parent_folder_id: Optional[str],
         updater: str = "",
+        before_folder_id: Optional[str] = None,
     ) -> Optional[WorkspaceFolder]:
-        """移动文件夹并级联更新后代 full_path/depth（kb 维度）"""
+        """移动文件夹并级联更新后代 full_path/depth（kb 维度）。
+
+        before_folder_id 指定落位（插到目标父下该文件夹之前）；
+        为 None 时落到目标父末尾。同父移动（纯排序）同样适用。
+        """
         try:
             folder = session.query(self.model).filter(
                 self.model.folder_id == folder_id,
@@ -713,6 +782,36 @@ class WorkspaceFolderRepository(BaseRepository[WorkspaceFolder]):
                 d.full_path = new_path + d.full_path[len(old_path):]
                 d.depth = d.depth + depth_delta
                 d.updater = updater
+
+            # 落位：目标父下当前序 → 移除自己 → 插到 before 之前（无则末尾）→ 全量固化
+            if before_folder_id is not None:
+                before_folder = session.query(self.model).filter(
+                    self.model.knowledge_base_id == kb_id,
+                    self.model.folder_id == before_folder_id,
+                    self.model.deleted == 0,
+                ).first()
+                if not before_folder or before_folder.folder_id == folder_id:
+                    raise ValueError("插入位置文件夹无效")
+                if before_folder.parent_folder_id != target_parent_folder_id:
+                    raise ValueError("插入位置不在目标父文件夹下")
+
+            sibling_ids = [
+                f.folder_id
+                for f in self.get_children_in_kb(
+                    session, kb_id, target_parent_folder_id
+                )
+            ]
+            if folder_id in sibling_ids:
+                sibling_ids.remove(folder_id)
+            if before_folder_id and before_folder_id in sibling_ids:
+                sibling_ids.insert(
+                    sibling_ids.index(before_folder_id), folder_id
+                )
+            else:
+                sibling_ids.append(folder_id)
+            self.reorder_folders_in_kb(
+                session, kb_id, target_parent_folder_id, sibling_ids
+            )
 
             session.commit()
             session.refresh(folder)

@@ -78,6 +78,13 @@ class FolderMoveRequest(BaseModel):
     target_parent_folder_id: Optional[str] = Field(
         default=None, description="目标父文件夹ID（None 表示移到根目录）"
     )
+    before_folder_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "落位：插到目标父下该文件夹之前；None=落到目标父末尾。"
+            "同父移动（纯排序）同样适用。"
+        ),
+    )
 
 
 # ==================== 文件夹内文件查询 ====================

@@ -122,16 +122,18 @@ class KnowledgeMoveService:
         user_id: str,
         file_id: str,
         target_folder_id: str | None,
+        before_file_id: str | None = None,
     ) -> str:
-        """移动单个文件到目标文件夹
+        """移动单个文件到目标文件夹（可选落位），幂等。
 
         file_id 为 uuid 全局唯一；判权经其所属知识库（共享库团队成员
-        可移动其他成员上传的文件）。
+        可移动其他成员上传的文件）。同文件夹移动=排序（不再报错），
+        位置不变时重排结果相同、无副作用。
 
         Raises:
             FileNotFoundError: 文件不存在
             PermissionError: 无权操作该文件
-            ValueError: 目标文件夹无效、跨知识库、或文件已在目标文件夹
+            ValueError: 目标文件夹无效、跨知识库、或落位文件无效
             SQLAlchemyError: 数据库操作失败
         """
         file_record = workspace_file_system_repo.get_by_file_id(
@@ -142,16 +144,48 @@ class KnowledgeMoveService:
 
         self._require_file_write(session, user_id, file_record)
 
-        if file_record.folder_id == target_folder_id:
-            raise ValueError("文件已在目标文件夹中")
+        same_folder = file_record.folder_id == target_folder_id
+        if not same_folder:
+            self.validate_target_folder(
+                session, user_id, target_folder_id,
+                expected_knowledge_base_id=file_record.knowledge_base_id,
+            )
 
-        self.validate_target_folder(
-            session, user_id, target_folder_id,
-            expected_knowledge_base_id=file_record.knowledge_base_id,
+        if before_file_id is not None:
+            before_file = workspace_file_system_repo.get_by_file_id(
+                session, before_file_id
+            )
+            if (
+                not before_file
+                or before_file.file_id == file_id
+                or before_file.knowledge_base_id
+                != file_record.knowledge_base_id
+                or before_file.folder_id != target_folder_id
+            ):
+                raise ValueError("插入位置文件无效")
+
+        kb_id = file_record.knowledge_base_id
+        if not same_folder:
+            file_record.folder_id = target_folder_id
+            file_record.updater = user_id
+
+        # 落位：目标文件夹当前序 → 移除自己 → before 前插入/末尾 → 全量固化
+        ordered_ids = [
+            f.file_id
+            for f in workspace_file_system_repo.get_by_folder_id_in_kb(
+                session, kb_id, target_folder_id
+            )
+        ]
+        if file_id in ordered_ids:
+            ordered_ids.remove(file_id)
+        if before_file_id and before_file_id in ordered_ids:
+            ordered_ids.insert(ordered_ids.index(before_file_id), file_id)
+        else:
+            ordered_ids.append(file_id)
+        workspace_file_system_repo.reorder_files_in_kb(
+            session, kb_id, target_folder_id, ordered_ids
         )
 
-        file_record.folder_id = target_folder_id
-        file_record.updater = user_id
         session.commit()
 
         logger.info(
@@ -183,6 +217,8 @@ class KnowledgeMoveService:
             session, user_id, target_folder_id
         )
         target_kb_id = target_folder.knowledge_base_id if target_folder else None
+        moved_ids: List[str] = []
+        moved_kb_id: str | None = None
 
         try:
             for file_id in file_ids:
@@ -223,7 +259,31 @@ class KnowledgeMoveService:
 
                 file_record.folder_id = target_folder_id
                 file_record.updater = user_id
+                moved_ids.append(file_id)
+                moved_kb_id = file_record.knowledge_base_id
                 result.moved_count += 1
+
+            # 批量移动的文件统一落到目标文件夹末尾（固化目标文件夹全序）
+            if moved_ids:
+                kb_for_order = (
+                    target_folder.knowledge_base_id
+                    if target_folder
+                    else moved_kb_id
+                )
+                if kb_for_order:
+                    ordered_ids = [
+                        f.file_id
+                        for f in workspace_file_system_repo
+                        .get_by_folder_id_in_kb(
+                            session, kb_for_order, target_folder_id
+                        )
+                    ]
+                    ordered_ids = [
+                        fid for fid in ordered_ids if fid not in moved_ids
+                    ] + moved_ids
+                    workspace_file_system_repo.reorder_files_in_kb(
+                        session, kb_for_order, target_folder_id, ordered_ids
+                    )
 
             session.commit()
         except SQLAlchemyError as e:

@@ -488,10 +488,45 @@ class WorkspaceFileSystemRepository(BaseRepository[WorkspaceFileSystem]):
                 query = query.filter(self.model.folder_id.is_(None))
             else:
                 query = query.filter(self.model.folder_id == folder_id)
-            return query.all()
+            # 手动排序在前（0..n-1），未排序的按上传时间沉底
+            return query.order_by(
+                self.model.sort_order.is_(None),
+                self.model.sort_order,
+                self.model.create_time,
+            ).all()
         except SQLAlchemyError as e:
             logger.error(f"kb维度查询文件夹文件失败: {e}")
             return []
+
+    def reorder_files_in_kb(
+        self,
+        session: Session,
+        knowledge_base_id: str,
+        folder_id: Optional[str],
+        ordered_file_ids: List[str],
+    ) -> int:
+        """按给定顺序固化文件夹内文件的 sort_order（0..n-1）。
+
+        未列出的存活行不动（仍 NULL 沉底）。不提交，由调用方事务控制。
+        返回更新的行数。
+        """
+        updated = 0
+        try:
+            for index, file_id in enumerate(ordered_file_ids):
+                result = (
+                    session.query(self.model)
+                    .filter(
+                        self.model.knowledge_base_id == knowledge_base_id,
+                        self.model.file_id == file_id,
+                        self.model.deleted == 0,
+                    )
+                    .update({"sort_order": index}, synchronize_session=False)
+                )
+                updated += result
+            return updated
+        except SQLAlchemyError as e:
+            logger.error(f"kb维度重排文件夹文件失败: {e}")
+            raise
 
     def search_by_name_in_kb(
         self,

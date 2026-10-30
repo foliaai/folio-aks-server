@@ -163,7 +163,10 @@ async def create_folder(
         parent_folder_id=request.parent_folder_id,
         full_path=full_path,
         depth=depth,
-        sort_order=0,
+        # 新建文件夹排到同级末尾
+        sort_order=workspace_folder_repo.next_sort_order_in_kb(
+            session, request.knowledge_base_id, request.parent_folder_id
+        ),
         is_default=0,
         knowledge_base_id=request.knowledge_base_id,
         knowledge_base_name=kb.knowledge_base_name,
@@ -365,6 +368,7 @@ async def move_folder(
             folder_id,
             request.target_parent_folder_id,
             updater=user_id,
+            before_folder_id=request.before_folder_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
