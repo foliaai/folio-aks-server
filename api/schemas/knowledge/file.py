@@ -25,6 +25,13 @@ class FileMoveRequest(BaseModel):
     target_folder_id: Optional[str] = Field(
         default=None, description="目标文件夹ID（None 表示移到根目录）"
     )
+    before_file_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "落位：插到目标文件夹下该文件之前；None=落到目标文件夹末尾。"
+            "同文件夹移动（纯排序）同样适用，接口幂等。"
+        ),
+    )
 
 
 class FileMoveResponse(BaseModel):
