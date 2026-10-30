@@ -152,7 +152,8 @@ async def move_file(
 ) -> ApiResponse[FileMoveResponse]:
     try:
         file_name = knowledge_move_service.move_file(
-            session, user_id, file_id, request.target_folder_id
+            session, user_id, file_id, request.target_folder_id,
+            before_file_id=request.before_file_id,
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="文件不存在或无权限")

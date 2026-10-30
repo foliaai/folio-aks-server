@@ -162,7 +162,13 @@ class WorkspaceFileSystem(BaseModel, KnowledgeMixin):
     )
     
     # ==================== 处理状态 ====================
-    
+
+    sort_order = Column(
+        Integer,
+        nullable=True,
+        comment="文件夹内手动排序权重（0..n-1 固化写入）；NULL=未排序，按 create_time 沉底",
+    )
+
     queue_position = Column(
         Integer, 
         nullable=True,
